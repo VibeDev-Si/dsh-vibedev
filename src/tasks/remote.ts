@@ -14,12 +14,19 @@ export interface RemoteOutput {
   readonly url?: string
   readonly contentType?: string
   readonly title?: string
+  /** Playback length. */
   readonly durationSeconds?: number
+  /** The provider's original length this output is billed on, when it differs from playback (speech). */
+  readonly originalSeconds?: number
 }
 
 /** A task's state. */
 export interface RemoteTask {
   readonly id: string
+  /**
+   * `completed` also covers `settlement_pending`: the result exists and is
+   * saved, only the charge is still being settled — it is never generated again.
+   */
   readonly state: 'pending' | 'completed' | 'failed'
   /** The gateway's own status word. */
   readonly status: string
@@ -30,6 +37,12 @@ export interface RemoteTask {
   readonly estimatedCny?: string
   /** Settled charge (CNY); absent until the gateway settles, which is not the same as free. */
   readonly chargedCny?: string
+  /** Whether the charge of a finished task has settled; absent when the gateway does not say. */
+  readonly settlement?: 'pending' | 'settled'
+  /** The billed original length of the whole task, in seconds (speech). */
+  readonly billedOriginalSeconds?: number
+  /** The billed input length, in minutes (transcription). */
+  readonly billedMinutes?: number
   readonly outputs: readonly RemoteOutput[]
 }
 
@@ -47,14 +60,43 @@ const amount = (value: unknown): string | undefined => {
   return raw !== undefined && /^-?\d+(?:\.\d+)?$/.test(raw) ? raw : undefined
 }
 
-const COMPLETED = new Set(['completed', 'succeeded', 'success', 'done', 'finished'])
+const COMPLETED = new Set(['completed', 'succeeded', 'success', 'done', 'finished', 'settlement_pending'])
 const FAILED = new Set(['failed', 'failure', 'error', 'cancelled', 'canceled', 'expired', 'rejected'])
+const CANCELLED = new Set(['cancelled', 'canceled'])
+/** The result exists; only the charge is still being settled. */
+const SETTLEMENT_PENDING = 'settlement_pending'
+// Any other word, `submission_unknown` included (the gateway is still settling whether the provider took the
+// request, under the same key), counts as still open: the task is only polled, never submitted again.
 
 function stateOf(status: string): RemoteTask['state'] {
   const word = status.toLowerCase()
   if (COMPLETED.has(word)) return 'completed'
   if (FAILED.has(word)) return 'failed'
   return 'pending'
+}
+
+const seconds = (value: unknown): number | undefined => {
+  const number = typeof value === 'string' ? Number(value) : value
+  return typeof number === 'number' && Number.isFinite(number) && number > 0 ? number : undefined
+}
+
+/** The billing facts of a task: whether the charge settled, and the billed length. */
+function billing(raw: Json, status: string): Pick<RemoteTask, 'settlement' | 'billedOriginalSeconds' | 'billedMinutes'> {
+  const blocks = [record(raw.billing), record(raw.usage), record(raw.effective), raw].filter((block): block is Json => block !== undefined)
+  const pick = (...names: string[]): unknown => {
+    for (const block of blocks) for (const name of names) if (block[name] !== undefined) return block[name]
+    return undefined
+  }
+  const originalSeconds = seconds(pick('original_seconds', 'billed_original_seconds', 'original_duration_seconds'))
+  const minutes = seconds(pick('billed_minutes', 'minutes'))
+  const stateRaw = text(pick('settlement_state', 'settlement_status'))?.toLowerCase()
+  const settlement = status.toLowerCase() === SETTLEMENT_PENDING || stateRaw === 'pending' ? 'pending'
+    : stateRaw === 'settled' || stateRaw === 'completed' ? 'settled' : undefined
+  return {
+    ...settlement === undefined ? {} : { settlement },
+    ...originalSeconds === undefined ? {} : { billedOriginalSeconds: originalSeconds },
+    ...minutes === undefined ? {} : { billedMinutes: minutes },
+  }
 }
 
 function errorOf(raw: Json): RemoteTask['error'] {
@@ -136,23 +178,30 @@ export function parseAudioTask(body: unknown): RemoteTask | undefined {
       const url = httpUrl(output.content_url) ?? httpUrl(output.url)
       const contentType = text(output.content_type)
       const title = text(output.title)
-      const duration = typeof output.duration_seconds === 'number' && output.duration_seconds > 0 ? output.duration_seconds : undefined
+      const duration = seconds(output.duration_seconds)
+      const original = seconds(output.original_duration_seconds) ?? seconds(output.original_seconds)
       outputs.push({
         index,
         ...url === undefined ? {} : { url },
         ...contentType === undefined ? {} : { contentType },
         ...title === undefined ? {} : { title },
         ...duration === undefined ? {} : { durationSeconds: duration },
+        ...original === undefined ? {} : { originalSeconds: original },
       })
     }
   }
-  const error = state === 'failed' ? errorOf(raw) ?? { code: 'GENERATION_FAILED', message: `the task ended with status "${status}"` } : undefined
+  const cancelled = CANCELLED.has(status.toLowerCase())
+  const error = state === 'failed'
+    ? errorOf(raw) ?? (cancelled ? { code: 'CANCELLED', message: 'The task was cancelled; cancelled tasks are not charged.' }
+      : { code: 'GENERATION_FAILED', message: `the task ended with status "${status}"` })
+    : undefined
   const progress = progressOf(raw.progress)
   return {
     id, state, status,
     ...progress === undefined ? {} : { progress },
     ...error === undefined ? {} : { error },
     ...receipt(raw),
+    ...billing(raw, status),
     outputs: state === 'completed' ? outputs : [],
   }
 }

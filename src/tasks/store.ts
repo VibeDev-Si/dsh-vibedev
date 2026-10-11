@@ -34,7 +34,10 @@ export interface TaskOutput {
   readonly contentType?: string
   readonly bytes?: number
   readonly title?: string
+  /** Playback length. */
   readonly durationSeconds?: number
+  /** The original length this output is billed on (speech), when the gateway reports it. */
+  readonly originalSeconds?: number
 }
 
 /** One task. */
@@ -64,6 +67,20 @@ export interface TaskRecord {
   readonly error?: { readonly code: string; readonly message: string }
   readonly estimatedCny?: string
   readonly chargedCny?: string
+  /**
+   * Whether the charge of a finished task has settled. `pending`: the result is
+   * saved and is never generated again; only the charge is still to come.
+   */
+  readonly settlement?: 'pending' | 'settled'
+  /** What an audio task makes (music, podcast or speech). */
+  readonly audioKind?: string
+  /** How the task is billed, and the billed length once the gateway reports it. */
+  readonly billing?: {
+    readonly unit?: string
+    readonly unitPriceCny?: string
+    readonly originalSeconds?: number
+    readonly minutes?: number
+  }
   readonly finishedAt?: number
 }
 

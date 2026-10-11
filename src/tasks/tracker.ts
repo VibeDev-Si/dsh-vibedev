@@ -526,12 +526,29 @@ export class TaskTracker {
     return Math.min(60_000, 5_000 * 2 ** Math.min(failures - 1, 4))
   }
 
+  /** The money and billing facts of a gateway answer, merged into what the record already knows. */
+  private moneyOf(record: TaskRecord, task: RemoteTask): Partial<TaskRecord> {
+    // A charge reported while settlement is still pending is not final, and not a free task either.
+    const charged = task.settlement === 'pending' ? undefined : task.chargedCny
+    const settlement = task.settlement ?? (charged !== undefined ? 'settled' : undefined)
+    const billing = task.billedOriginalSeconds !== undefined || task.billedMinutes !== undefined ? {
+      billing: {
+        ...record.billing,
+        ...task.billedOriginalSeconds === undefined ? {} : { originalSeconds: task.billedOriginalSeconds },
+        ...task.billedMinutes === undefined ? {} : { minutes: task.billedMinutes },
+      },
+    } : {}
+    return {
+      ...task.estimatedCny === undefined ? {} : { estimatedCny: task.estimatedCny },
+      ...charged === undefined ? {} : { chargedCny: charged },
+      ...settlement === undefined ? {} : { settlement },
+      ...billing,
+    }
+  }
+
   /** Record what the gateway says about a task; save the outputs of a finished one. */
   private async apply(record: TaskRecord, task: RemoteTask): Promise<TaskRecord> {
-    const money = {
-      ...task.estimatedCny === undefined ? {} : { estimatedCny: task.estimatedCny },
-      ...task.chargedCny === undefined ? {} : { chargedCny: task.chargedCny },
-    }
+    const money = this.moneyOf(record, task)
     if (task.state === 'pending') {
       return this.update(record.id, { gatewayId: task.id, status: 'pending', progress: progressLine(task), ...money })
     }
@@ -544,19 +561,54 @@ export class TaskTracker {
       const attempts = (this.downloadFailures.get(record.id) ?? 0) + 1
       this.downloadFailures.set(record.id, attempts)
       if (attempts < (this.options.downloadAttempts ?? 5)) {
+        // The next round polls the task again (fresh links), never submits it again.
         throw new MediaError(`${missing} result file(s) could not be downloaded yet.`, 'DOWNLOAD_RETRY', { retryable: true })
       }
     }
     let charged = money
-    if (task.chargedCny === undefined) {
+    if (money.chargedCny === undefined && task.settlement !== 'pending') {
       // The charge settles shortly after completion; one more look, best effort. A missing charge is not a free task.
       const settled = await this.options.http.json(SPECS[record.kind].poll(task.id), { timeoutMs: 15_000, signal: this.signal })
         .then(body => SPECS[record.kind].parse(body), () => undefined)
-      if (settled?.chargedCny !== undefined) charged = { ...money, chargedCny: settled.chargedCny }
+      if (settled !== undefined) charged = { ...money, ...this.moneyOf(current, settled) }
     }
     return this.finish(record.id, {
       gatewayId: task.id, status: 'completed', outputs, ...charged,
       ...missing === 0 ? {} : { error: { code: 'DOWNLOAD_FAILED', message: `${missing} of ${outputs.length} result file(s) could not be downloaded; the gateway links are listed instead.` } },
+    })
+  }
+
+  /**
+   * Ask the gateway about a task again, by query only: a finished task gets
+   * fresh links (signed links expire), files that are missing locally are
+   * downloaded again, and a pending settlement is read again. Nothing is ever
+   * submitted from here, so a failed query or download cannot create a task.
+   * A task still running is followed as usual.
+   * @param id - the local task id.
+   * @param signal - cancels the query.
+   * @returns the task after the query.
+   */
+  async refresh(id: string, signal?: AbortSignal): Promise<TaskRecord> {
+    const record = await this.options.store.get(id)
+    if (record === undefined) throw new MediaError(`dsh-vibedev has no task ${id}.`, 'UNKNOWN_TASK')
+    if (!isFinished(record)) {
+      this.followQuietly(id)
+      return record
+    }
+    if (record.gatewayId === undefined) return record
+    const spec = SPECS[record.kind]
+    const task = spec.parse(await this.options.http.json(spec.poll(record.gatewayId), { timeoutMs: 30_000, ...signal === undefined ? {} : { signal } }))
+    if (task === undefined) throw new MediaError('The VibeDev gateway returned an unreadable task.', 'GATEWAY_BAD_RESPONSE')
+    const money = this.moneyOf(record, task)
+    if (task.state !== 'completed') return this.update(id, money)
+    // Keep what is saved; take the gateway's current link for every output, and fetch what is missing.
+    const fresh = new Map(task.outputs.map(output => [output.index, output]))
+    const known = (record.outputs ?? []).filter(output => output.path !== undefined && output.index !== undefined)
+      .map(output => ({ ...output, ...fresh.get(output.index as number)?.url === undefined ? {} : { url: fresh.get(output.index as number)?.url } }))
+    const { outputs, missing } = await this.saveOutputs({ ...record, outputs: known }, task)
+    return this.update(id, {
+      ...money, outputs,
+      error: missing === 0 ? undefined : { code: 'DOWNLOAD_FAILED', message: `${missing} of ${outputs.length} result file(s) could not be downloaded; the gateway links are listed instead.` },
     })
   }
 
@@ -581,6 +633,7 @@ export class TaskTracker {
         ...output.contentType === undefined ? {} : { contentType: output.contentType },
         ...output.title === undefined ? {} : { title: output.title },
         ...output.durationSeconds === undefined ? {} : { durationSeconds: output.durationSeconds },
+        ...output.originalSeconds === undefined ? {} : { originalSeconds: output.originalSeconds },
       }
       const fromUrl = urlExtension(output.url)
       const extension = output.contentType === undefined

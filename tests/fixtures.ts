@@ -117,11 +117,13 @@ export const CATALOG = {
     {
       id: 'doubao-music-vibedev', display_name: '豆包音乐', media_type: 'audio',
       capabilities: { chat: false, output_modalities: ['audio'], allowed_endpoints: ['/v1/audio/generations'] },
+      audio: { generation_kind: 'music', prompt_field: 'prompt', request_fields: ['model', 'prompt', 'lyrics', 'genre', 'mood', 'gender'], billing_unit: 'generation' },
       media_pricing: { currency: 'CNY', tiers: [], default: { unit: 'generation', amount: 0.5 } },
     },
     {
       id: 'doubao-podcast-vibedev', display_name: '豆包播客', media_type: 'audio',
       capabilities: { chat: false, output_modalities: ['audio'], allowed_endpoints: ['/v1/audio/generations'] },
+      audio: { generation_kind: 'podcast', prompt_field: 'prompt', request_fields: ['model', 'prompt', 'source_url'], billing_unit: 'generation' },
     },
     {
       id: 'doubao-asr-vibedev', display_name: '豆包语音转写', media_type: 'transcription',
@@ -204,6 +206,81 @@ export const LIVE_CATALOG = {
         chat: false, async_create_poll_content: true, audio_generation: true,
       },
       media_pricing: { currency: 'CNY', default: { unit: 'generation', amount: 0.5 } },
+    },
+  ],
+}
+
+/** The Seed speech `audio` block: text in `text_prompt`, voice references, WAV/MP3 at their own sample rates. */
+export const SEED_SPEECH_AUDIO = {
+  generation_kind: 'speech',
+  prompt_field: 'text_prompt',
+  request_fields: ['model', 'text_prompt', 'references', 'audio_config', 'watermark'],
+  billing_unit: 'original_second',
+  max_prompt_chars: 300,
+  references: {
+    min_count: 0, max_count: 2, max_bytes: 5 * 1024 * 1024,
+    min_duration_seconds: 3, max_duration_seconds: 30, max_total_duration_seconds: 40,
+    allowed_mimes: ['audio/wav', 'audio/mpeg'], mutually_exclusive_with: ['voice_id'],
+  },
+  output_formats: [
+    { format: 'wav', sample_rates: [16000, 24000, 48000], default_sample_rate: 24000 },
+    { format: 'mp3', sample_rates: [24000, 32000], default_sample_rate: 24000 },
+  ],
+  default_format: 'mp3',
+}
+
+/**
+ * A catalog as the gateway will ship audio: structured `audio` blocks on every
+ * audio model, an alias, a model this plugin has never seen, one that declares
+ * no kind, and transcription billed per minute.
+ */
+export const AUDIO_CATALOG = {
+  object: 'list',
+  data: [
+    {
+      id: 'deepseek-v4-flash', display_name: 'DeepSeek V4 Flash', protocol: 'openai',
+      capabilities: { context_window: 1_000_000, allowed_endpoints: ['/v1/chat/completions'] },
+    },
+    {
+      // Named like a podcast model, declared as music: the declaration decides.
+      id: 'podcast-style-music-vibedev', display_name: '播客风格音乐', media_type: 'audio',
+      capabilities: { output_modalities: ['audio'], allowed_endpoints: ['/v1/audio/generations'] },
+      audio: {
+        generation_kind: 'music', prompt_field: 'prompt', request_fields: ['model', 'prompt', 'lyrics', 'genre', 'mood', 'gender'],
+        billing_unit: 'generation', choices: { gender: ['male', 'female'] },
+      },
+      media_pricing: { currency: 'CNY', default: { unit: 'generation', amount: 0.5 } },
+    },
+    {
+      id: 'doubao-podcast-vibedev', display_name: '豆包播客', media_type: 'audio',
+      capabilities: { output_modalities: ['audio'], allowed_endpoints: ['/v1/audio/generations'] },
+      audio: { generation_kind: 'podcast', prompt_field: 'prompt', request_fields: ['model', 'prompt', 'source_url'], billing_unit: 'generation' },
+      media_pricing: { currency: 'CNY', default: { unit: 'generation', amount: 1 } },
+    },
+    {
+      id: 'seed-tts-2.0-vibedev', display_name: 'Seed 语音合成 2.0', media_type: 'audio', aliases: ['seed-tts', 'seed-tts-latest'],
+      capabilities: { output_modalities: ['audio'], allowed_endpoints: ['/v1/audio/generations'] },
+      audio: SEED_SPEECH_AUDIO,
+      // The price names no unit: it is read in the declared billing unit.
+      media_pricing: { currency: 'CNY', default: { amount: 0.015 } },
+    },
+    {
+      // A model added after this plugin was written: recognized from its declaration alone.
+      id: 'brand-new-music-2027', display_name: 'Brand new music', media_type: 'audio',
+      capabilities: { output_modalities: ['audio'] },
+      audio: { generationKind: 'music', promptField: 'prompt', requestFields: ['model', 'prompt'], billingUnit: 'generation' },
+    },
+    {
+      // Undeclared: listed, never treated as music.
+      id: 'mystery-audio', media_type: 'audio',
+      capabilities: { output_modalities: ['audio'], allowed_endpoints: ['/v1/audio/generations'] },
+      media_pricing: { currency: 'CNY', default: { unit: 'generation', amount: 0.2 } },
+    },
+    {
+      id: 'doubao-asr-vibedev', display_name: '豆包语音转写', media_type: 'audio',
+      capabilities: { allowed_endpoints: ['/v1/audio/transcriptions'] },
+      audio: { generation_kind: 'transcription', billing_unit: 'minute', max_input_bytes: 20_000_000, max_input_seconds: 600, languages: ['zh'] },
+      media_pricing: { currency: 'CNY', default: { unit: 'minute', amount: 0.3 } },
     },
   ],
 }

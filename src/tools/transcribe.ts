@@ -7,7 +7,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { MediaError } from '../gateway/errors.js'
-import { yuan } from '../pricing.js'
+import { quoteAudio, yuan } from '../pricing.js'
 import type { MediaRuntime } from '../runtime.js'
 import { saveNewFile } from '../util/files.js'
 import { SOURCE_HELP } from './common.js'
@@ -65,8 +65,9 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 export function audioTranscribeTool(runtime: MediaRuntime): ToolDefinition {
   return defineTool({
     name: 'audio_transcribe',
-    description: 'Transcribe speech in an audio file to text with a VibeDev transcription model. Mandarin Chinese (zh) only for now; '
-      + 'at most 20 MB and 10 minutes; 16 kHz mono WAV works best. Charged per minute of audio.',
+    description: 'Transcribe speech in an audio file to text with a VibeDev transcription model (uploaded as a multipart file). '
+      + 'Each model states its languages and limits (media_models; commonly Mandarin Chinese, at most 20 MB and 10 minutes); '
+      + '16 kHz mono WAV works best. Charged per minute of audio.',
     parameters: {
       file: { type: 'string', required: true, description: `The audio file: ${SOURCE_HELP}.` },
       language: { type: 'string', description: 'Language code of the speech. Only zh is supported now (the default).' },
@@ -94,19 +95,26 @@ export function audioTranscribeTool(runtime: MediaRuntime): ToolDefinition {
     async execute(args, exec) {
       const language = (args.language ?? 'zh').trim().toLowerCase() || 'zh'
       const model = await runtime.pickModel('transcription', 'transcription', args.model, undefined, exec.signal)
-      const media = await runtime.load(exec, args.file, 'audio', MAX_BYTES)
-      if (!ACCEPTED.includes(media.mime)) {
+      // The model's declared limits, else the gateway's long-standing ones.
+      const declared = model.audio
+      const maxBytes = declared?.maxInputBytes ?? MAX_BYTES
+      const maxSeconds = declared?.maxInputSeconds ?? MAX_SECONDS
+      const accepted = declared?.inputMimes ?? ACCEPTED
+      if (declared?.languages !== undefined && !declared.languages.includes(language)) {
+        throw new MediaError(`${model.id} transcribes ${declared.languages.join(', ')}, not "${language}".`, 'AUDIO_OPTION_INVALID', { field: 'language' })
+      }
+      const media = await runtime.load(exec, args.file, 'audio', maxBytes)
+      if (!accepted.includes(media.mime)) {
         throw new MediaError(`"${media.source}" is ${media.mime}, not an audio file the gateway transcribes; convert it to 16 kHz mono WAV first.`, 'AUDIO_FORMAT_UNSUPPORTED', { field: 'file' })
       }
       const seconds = media.mime === 'audio/wav' ? wavSeconds(media.data) : undefined
-      if (seconds !== undefined && seconds > MAX_SECONDS) {
-        throw new MediaError(`"${media.source}" is ${(seconds / 60).toFixed(1)} minutes long; the limit is 10 minutes. Split it first.`, 'AUDIO_TOO_LONG', { field: 'file' })
+      if (seconds !== undefined && seconds > maxSeconds) {
+        throw new MediaError(`"${media.source}" is ${(seconds / 60).toFixed(1)} minutes long; the limit is ${(maxSeconds / 60).toFixed(0)} minutes. Split it first.`, 'AUDIO_TOO_LONG', { field: 'file' })
       }
-      const tier = model.pricing?.default ?? model.pricing?.tiers[0]
-      const estimate = tier?.unit === 'second' && seconds !== undefined ? tier.amount * seconds : undefined
+      const quote = quoteAudio(model, seconds)
       await runtime.confirmSpending(exec, 'audio_transcribe', {
-        en: `Transcribe ${media.name} with ${model.id}${estimate === undefined ? ' (billed per minute)' : `, about ${yuan(estimate)}`}.`,
-        zh: `用 ${model.id} 转写 ${media.name}${estimate === undefined ? '（按分钟计费）' : `，约 ${yuan(estimate)}`}。`,
+        en: `Transcribe ${media.name} with ${model.id}: ${quote.amountCny === undefined ? quote.basis.en : `about ${yuan(quote.amountCny)} (${quote.basis.en})`}.`,
+        zh: `用 ${model.id} 转写 ${media.name}：${quote.amountCny === undefined ? quote.basis.zh : `约 ${yuan(quote.amountCny)}（${quote.basis.zh}）`}。`,
       })
       const body = new FormData()
       body.append('file', new Blob([media.data as Uint8Array<ArrayBuffer>], { type: media.mime }), media.name)

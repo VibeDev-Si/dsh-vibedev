@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseMediaCatalog } from '../src/gateway/catalog.js'
-import { describePrice, estimateAudio, estimateImages, estimateVideo } from '../src/pricing.js'
+import { describePrice, estimateImages, estimateVideo, quoteAudio } from '../src/pricing.js'
 import { CATALOG } from './fixtures.js'
 
 const models = parseMediaCatalog(CATALOG)
@@ -15,7 +15,9 @@ describe('pricing', () => {
     expect(describePrice(model('gpt-image-2.5-flare'))).toBe('¥0.10 per image (1K)')
     expect(describePrice(model('seedance-2.0'))).toBe('¥0.99/s (720p)')
     expect(describePrice(model('doubao-music-vibedev'))).toBe('¥0.50 per generation')
-    expect(describePrice(model('doubao-podcast-vibedev'))).toBeUndefined()
+    // No price is not a free model.
+    expect(describePrice(model('doubao-podcast-vibedev'))).toBe('not priced')
+    expect(describePrice(model('doubao-podcast-vibedev'), 'zh')).toBe('未定价')
   })
 
   it('estimates images per image', () => {
@@ -31,7 +33,8 @@ describe('pricing', () => {
   })
 
   it('estimates music per request and gives up without a price', () => {
-    expect(estimateAudio(model('doubao-music-vibedev'))).toEqual({ amountCny: 0.5, basis: '¥0.50 per request' })
-    expect(estimateAudio(model('doubao-podcast-vibedev'))).toBeUndefined()
+    expect(quoteAudio(model('doubao-music-vibedev'))).toMatchObject({ priced: true, unit: 'generation', amountCny: 0.5, label: { zh: '¥0.50/次' } })
+    expect(quoteAudio(model('doubao-podcast-vibedev'))).toMatchObject({ priced: false, label: { zh: '未定价', en: 'not priced' } })
+    expect(quoteAudio(model('doubao-podcast-vibedev')).amountCny).toBeUndefined()
   })
 })

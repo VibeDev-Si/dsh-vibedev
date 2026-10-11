@@ -10,7 +10,7 @@ import type { SettingsFieldSpec } from '@deepseek-ai/dsh-client-ui-primitives'
 export const SETTINGS_NAMESPACE = 'dsh-vibedev'
 
 /** The model slots, in page order. */
-export const MODEL_FIELDS = ['imageModel', 'videoModel', 'musicModel', 'podcastModel', 'transcriptionModel'] as const
+export const MODEL_FIELDS = ['imageModel', 'videoModel', 'musicModel', 'podcastModel', 'speechModel', 'transcriptionModel'] as const
 
 /** Every field the page edits. */
 export const FIELDS = ['confirmSpending', 'outputDir', ...MODEL_FIELDS] as const

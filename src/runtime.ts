@@ -28,7 +28,32 @@ import type { TaskTracker } from './tasks/tracker.js'
 import { fileTimestamp, safeStem } from './util/files.js'
 
 /** The model a setting can pin per kind of output. */
-export type ModelSlot = 'image' | 'video' | 'music' | 'podcast' | 'transcription'
+export type ModelSlot = 'image' | 'video' | 'music' | 'podcast' | 'speech' | 'transcription'
+
+/**
+ * Whether a model serves a slot. Audio models serve the kind their catalog
+ * entry declares, and only that: an undeclared kind serves none.
+ * @param model - the model.
+ * @param slot - the slot.
+ * @returns whether the model can be chosen for it.
+ */
+export function servesSlot(model: MediaModel, slot: ModelSlot): boolean {
+  if (slot === 'music' || slot === 'podcast' || slot === 'speech') return model.kind === 'audio' && model.audioKind === slot
+  return model.kind === slot
+}
+
+/**
+ * The model a name refers to: its id, else one of its aliases (case-insensitive).
+ * @param models - the catalog.
+ * @param wanted - the id or alias.
+ * @returns the model, or undefined.
+ */
+export function modelNamed(models: readonly MediaModel[], wanted: string): MediaModel | undefined {
+  const lower = wanted.toLowerCase()
+  return models.find(model => model.id === wanted)
+    ?? models.find(model => model.id.toLowerCase() === lower)
+    ?? models.find(model => (model.aliases ?? []).some(alias => alias.toLowerCase() === lower))
+}
 
 /** Live settings (the plugin's volatile config). */
 export interface MediaSettings {
@@ -164,15 +189,17 @@ export class MediaRuntime {
   async pickModel(kind: MediaKind, slot: ModelSlot, requested: string | undefined, accept?: (model: MediaModel) => boolean,
     signal?: AbortSignal): Promise<MediaModel> {
     const models = await this.models(signal)
-    const ofKind = models.filter(model => model.kind === kind
-      && (slot === 'music' ? model.audioKind !== 'podcast' : slot === 'podcast' ? model.audioKind === 'podcast' : true))
+    const ofKind = models.filter(model => model.kind === kind && servesSlot(model, slot))
     const wanted = requested?.trim()
     if (wanted !== undefined && wanted !== '') {
-      const found = models.find(model => model.id === wanted) ?? models.find(model => model.id.toLowerCase() === wanted.toLowerCase())
+      const found = modelNamed(models, wanted)
       if (found === undefined) {
         throw new MediaError(`There is no model "${wanted}" on this VibeDev account. ${slotLabel(slot)} models: ${ofKind.map(model => model.id).join(', ') || 'none'}.`, 'MODEL_NOT_FOUND', { field: 'model' })
       }
       if (!ofKind.includes(found)) {
+        if (found.kind === 'audio' && found.audioKind === undefined) {
+          throw new MediaError(`${found.id} does not declare what kind of audio it makes, so it cannot be used for ${slotLabel(slot).toLowerCase()}.`, 'AUDIO_KIND_UNDECLARED', { field: 'model' })
+        }
         throw new MediaError(`${found.id} is not a ${slotLabel(slot).toLowerCase()} model. ${slotLabel(slot)} models: ${ofKind.map(model => model.id).join(', ') || 'none'}.`, 'MODEL_KIND_MISMATCH', { field: 'model' })
       }
       return found
@@ -180,9 +207,23 @@ export class MediaRuntime {
     if (ofKind.length === 0) {
       throw new MediaError(`This VibeDev account has no ${slotLabel(slot).toLowerCase()} model available right now.`, 'NO_MODEL_AVAILABLE')
     }
-    const pinned = this.settings.defaultModel(slot).trim()
-    const ordered = pinned === '' ? ofKind : [...ofKind.filter(model => model.id === pinned), ...ofKind.filter(model => model.id !== pinned)]
+    const pinnedName = this.settings.defaultModel(slot).trim()
+    const pinned = pinnedName === '' ? undefined : modelNamed(ofKind, pinnedName)
+    const ordered = pinned === undefined ? ofKind : [pinned, ...ofKind.filter(model => model !== pinned)]
     return (accept === undefined ? undefined : ordered.find(model => accept(model))) ?? ordered[0] as MediaModel
+  }
+
+  /**
+   * The model a name refers to, whatever its kind.
+   * @param requested - an id or alias.
+   * @param signal - cancels the catalog request.
+   * @returns the model.
+   * @throws {@link MediaError} when the account has no such model.
+   */
+  async findModel(requested: string, signal?: AbortSignal): Promise<MediaModel> {
+    const found = modelNamed(await this.models(signal), requested.trim())
+    if (found === undefined) throw new MediaError(`There is no model "${requested}" on this VibeDev account.`, 'MODEL_NOT_FOUND', { field: 'model' })
+    return found
   }
 
   /**
@@ -324,5 +365,5 @@ export class MediaRuntime {
 }
 
 function slotLabel(slot: ModelSlot): string {
-  return { image: 'Image', video: 'Video', music: 'Music', podcast: 'Podcast', transcription: 'Transcription' }[slot]
+  return { image: 'Image', video: 'Video', music: 'Music', podcast: 'Podcast', speech: 'Speech', transcription: 'Transcription' }[slot]
 }

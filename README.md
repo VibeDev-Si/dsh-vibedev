@@ -3,7 +3,7 @@
 在 DeepSeek Harness 里登录 VibeDev 账号，和 DeepSeek 账号并存：
 
 - **VibeDev 的模型**：登录后，模型选择器里会多出「VibeDev」一组（Claude、GPT 等网关提供的模型），和 DeepSeek 的模型并列，选中就能用；
-- **媒体生成**：Agent 可以生成图片、视频、音乐和播客，并把语音转成文字，结果保存在工作区的 `media/` 目录下；
+- **媒体生成**：Agent 可以生成图片、视频、音乐、播客和语音，并把语音转成文字，结果保存在工作区的 `media/` 目录下；
 - **网页搜索**：提供走 VibeDev 网关的网页搜索，见下面的「网页搜索」。
 
 费用都从你的 VibeDev 余额里扣，DeepSeek 账号照常由 DeepSeek Harness 自己管理，两边互不影响。还没有 VibeDev 账号的话，可以在 [VibeDev](https://api.vibedev.studio) 注册。
@@ -65,8 +65,8 @@
 | --- | --- |
 | `image_generate` | 生成图片；带参考图时用来改图、换风格或把产品放进场景。生成的图片 Agent 自己能看到。 |
 | `video_generate` | 生成视频，在后台运行，一般 1 到 10 分钟。完成后会通知 Agent，文件保存在 `media/videos/`。 |
-| `audio_generate` | 生成音乐（可以自带歌词）或一期播客（围绕一个话题或一个网页）。 |
-| `audio_transcribe` | 把语音转成文字（目前只支持普通话）。 |
+| `audio_generate` | 生成音乐（可以自带歌词）、一期播客（围绕一个话题或一个网页），或一段语音（朗读文字，可以用参考音频指定音色）。 |
+| `audio_transcribe` | 把语音转成文字（以文件上传，语言和时长限制以模型声明为准，目前常见为普通话）。 |
 | `media_models` | 列出账号可用的媒体模型和价格；视频模型还会列出每种模式接受哪些输入。 |
 | `media_tasks` | 查看进行中和已完成的视频、音频任务。 |
 | `media_account` | 查看用的是哪个 VibeDev 账号；登录或退出（和侧边栏、设置里的登录是同一个）。 |
@@ -81,11 +81,22 @@
 
 每个视频模型支持的模式、参考素材数量、时长、画面比例和分辨率都不一样。插件会按网关下发的模型能力逐项检查：模型不支持的请求，会在上传和扣费之前就被拒绝，并说明这个模型支持什么。所有参考素材会先上传到 VibeDev 网关的素材库，网关会检查格式，并测量参考视频的时长。
 
+### 音频模型
+
+音频模型是音乐、播客、语音还是转写，只看网关模型目录里 `audio.generation_kind` 的声明，不按模型名称猜；没有声明类型的模型会列出来，但不能用来生成。每个模型只提交它在 `request_fields` 里声明的字段，正文写进 `prompt_field` 指定的字段：
+
+- 音乐：`prompt`、`lyrics`、`genre`、`mood`、`gender`；
+- 播客：`prompt`、`source_url`；
+- 语音：按模型声明，例如 Seed 是 `text_prompt`、`references`（参考音频）、`audio_config`（输出格式和采样率）、`watermark`。
+
+参考音频的数量、大小、时长、不能同时使用的字段，以及 WAV、MP3 等格式各自支持的采样率，都以网关下发的能力为准。音乐和播客不接受参考音频、格式、采样率或时长参数。
+
 ## 费用
 
 - VibeDev 的聊天模型按用量计费，价格以 VibeDev 网关为准。
-- 图片按张计费，视频按秒计费（参考视频的时长也计入），音乐和播客按次计费。`media_models` 会列出当前价格。
-- 视频和音频只在成功时扣费，失败不扣。视频提交后无法取消。
+- 图片按张计费，视频按秒计费（参考视频的时长也计入），音乐和播客按次计费，语音按原始秒计费（按服务商返回的原始时长，可能和播放时长不同），转写按分钟计费。`media_models` 会列出当前价格；目录没有给出价格的模型显示「未定价」，不代表免费。
+- 视频和音频只在成功时扣费，失败和取消的任务不扣。视频提交后无法取消。
+- 同一次操作只会生成一次：提交没有得到确认时，会用同一个请求键向网关确认结果；查询或下载失败只会重新查询、刷新链接，不会重新提交。结果已经生成、但费用还在结算（`settlement_pending`）时，结果照常保存，不会重新生成。
 - 插件设置里的「每次付费生成前先询问」默认关闭。打开后，每次付费的媒体请求之前都会先弹出确认，并显示预估金额。
 
 ## 设置
@@ -96,7 +107,7 @@
 | --- | --- | --- |
 | 每次付费生成前先询问 | 关 | 打开后，每次媒体生成前先确认费用。 |
 | 保存目录 | `media` | 相对于工作区。 |
-| 默认生图 / 视频 / 音乐 / 播客 / 转写模型 | 空 | 留空时由 Agent 按模型目录选择。 |
+| 默认生图 / 视频 / 音乐 / 播客 / 语音合成 / 转写模型 | 空 | 留空时由 Agent 按模型目录选择；可以填模型 id 或别名。 |
 
 另有几项只能在配置文件（`cordis.patch.yml` 中 `dsh-vibedev` 一行）里改：`displayName`（模型选择器里显示的组名，默认 `VibeDev`）、`preferredModels`（排在最前的 VibeDev 模型）、`openBrowserOnSignIn`（登录时是否自动打开系统浏览器，默认开）、`catalogRefreshMinutes`（模型目录刷新间隔，默认 30 分钟）、`client`（登录时报给网关的客户端名称，默认 `vibedev-plugin`）、`primary`（作为应用的主账号显示，默认关，VibeDev 应用里开）。
 
@@ -137,7 +148,7 @@ npm run build
 Sign in to VibeDev in DeepSeek Harness, next to the DeepSeek account:
 
 - **VibeDev models**: once signed in, the model picker gains a "VibeDev" group (Claude, GPT and the other models of the VibeDev gateway) next to DeepSeek's;
-- **Media generation**: the agent generates images, videos, music and podcasts and transcribes speech; results are saved in the workspace under `media/`.
+- **Media generation**: the agent generates images, videos, music, podcasts and speech, and transcribes speech; results are saved in the workspace under `media/`.
 
 Everything is paid from your VibeDev balance; the DeepSeek account stays DeepSeek Harness's own, and the two do not affect each other. To create an account, register at [VibeDev](https://api.vibedev.studio). This plugin was renamed from `dsh-media`.
 
@@ -153,9 +164,11 @@ Everything is paid from your VibeDev balance; the DeepSeek account stays DeepSee
 
 **Web search**: the plugin registers the web search provider `vibedev-gateway`, signed in with your VibeDev account. Registering does not select it: DeepSeek Harness keeps its own search unless the profile sets `searchProvider: vibedev-gateway` on the `web` row (the VibeDev app does). Searching is free, but the gateway refuses every request, searches included, while the balance is zero.
 
-**Media tools**: `image_generate`, `video_generate` (runs as a background job), `audio_generate` (music or a podcast), `audio_transcribe` (Mandarin only for now), `media_models`, `media_tasks` and `media_account`. Reference images, videos and audio, and first and last frames, can each be a workspace path, an http(s) link, or `chat:1` for the most recent matching file you attached. A request the model cannot serve is refused before anything is uploaded or charged.
+**Media tools**: `image_generate`, `video_generate` (runs as a background job), `audio_generate` (music, a podcast or speech), `audio_transcribe` (a multipart file upload; languages and limits as each model declares), `media_models`, `media_tasks` and `media_account`. Reference images, videos and audio, and first and last frames, can each be a workspace path, an http(s) link, or `chat:1` for the most recent matching file you attached. A request the model cannot serve is refused before anything is uploaded or charged.
 
-**Cost**: chat models are billed by usage at the gateway's prices; images per image, video per second (reference video length counts), music and podcasts per request. Failed video and audio tasks are not charged, and a submitted video cannot be cancelled. "Ask before each paid generation" is off by default.
+**Audio models**: whether an audio model makes music, a podcast, speech or a transcription comes from its catalog declaration (`audio.generation_kind`), never from its name; a model that declares no kind is listed but cannot generate. Each model is sent only the fields it declares in `request_fields`, with the text in its `prompt_field`: music takes `prompt`, `lyrics`, `genre`, `mood` and `gender`; a podcast `prompt` and `source_url`; speech what it declares (Seed: `text_prompt`, `references`, `audio_config`, `watermark`). Speech reference limits (count, size, length, exclusions) and the sample rates of each output format come from the gateway. Music and podcasts take no references, format, sample rate or duration.
+
+**Cost**: chat models are billed by usage at the gateway's prices; images per image, video per second (reference video length counts), music and podcasts per request, speech per second of original audio (the length the provider reports, which can differ from playback), transcription per minute. A model without a catalog price is shown as "not priced" (未定价), never as free. Failed and cancelled video and audio tasks are not charged, and a submitted video cannot be cancelled. One operation generates once: an unconfirmed submission is settled under the same key, a failed query or download only queries again or renews the link, and a result whose charge is still settling (`settlement_pending`) is kept, never generated again. "Ask before each paid generation" is off by default.
 
 **Settings**: open "VibeDev Account & Models" on the Plugins page for the spending confirmation, the output folder and the default media models. `displayName`, `preferredModels`, `openBrowserOnSignIn`, `catalogRefreshMinutes`, `client` (the client name sent with the sign-in, default `vibedev-plugin`) and `primary` (show the account as the app's main account; off by default, on in the VibeDev app) are set in the profile's `cordis.patch.yml` row `dsh-vibedev`.
 
@@ -163,7 +176,7 @@ Everything is paid from your VibeDev balance; the DeepSeek account stays DeepSee
 
 **Privacy**: prompts and reference media are sent to the VibeDev gateway, which forwards them to the model provider. The plugin's own sign-in is kept in the DeepSeek Harness credential store, and task records under `dsh-media/` in the DeepSeek Harness data folder (the former name, kept so an upgrade loses nothing).
 
-**For other plugins**: the `vibedevMedia` service generates images and videos through the same model choice, reference checks, idempotent submission and background saving; the film workbench ([dsh-film](https://github.com/VibeDev-Si/dsh-film)) storyboard uses it.
+**For other plugins**: the `vibedevMedia` service generates images, videos and audio (`startAudio`: music, podcasts and speech) through the same model choice, reference checks, idempotent submission and background saving; the film workbench ([dsh-film](https://github.com/VibeDev-Si/dsh-film)) storyboard uses it. `audioForms()` describes the form of each audio model (only its declared fields, choices and limits, and its price). Every task is read the same way: `task` (as recorded), `refreshTask` (ask the gateway again — fresh links, settlement; a query, never a submission), `onTask` (each change) and `result` (the files to play or download). Pass the same `operationId` when one click is retried: its task is returned and nothing is submitted twice.
 
 **Third-party code**: the model route in `src/llm/` is ported from the VibeDev app; `context.ts`, `replay.ts` and `stream.ts` are copied from DeepSeek Harness's `@deepseek-ai/dsh-llm-pi-ai` (MIT). The licences of the bundled pi-ai, Anthropic SDK, OpenAI SDK and their dependencies are in `THIRD-PARTY-NOTICES.txt`.
 

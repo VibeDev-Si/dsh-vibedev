@@ -8,6 +8,12 @@
  * the versioned per-mode declarations (`modes_schema_version: 1`). A mode the
  * model does not list is unsupported; an unknown schema version makes the model
  * unusable rather than guessed at.
+ *
+ * Audio capabilities follow the `audio` block: `generation_kind` (music,
+ * podcast, speech or transcription), `prompt_field`, `request_fields`,
+ * `billing_unit` and the declared limits (references, output formats and their
+ * sample rates). An audio model that declares no kind is listed but cannot be
+ * chosen for generation: neither its name nor its id decides what it makes.
  * @module dsh-vibedev/gateway/catalog
  */
 
@@ -89,10 +95,17 @@ export interface VideoCapabilities {
   readonly gatewayRelayRequired?: boolean
 }
 
+/**
+ * What a price is charged per: one generation, one second of output, one
+ * second of ORIGINAL audio (speech is billed on the provider's original length,
+ * not on what plays back after processing), or one minute of input audio.
+ */
+export type PriceUnit = 'generation' | 'second' | 'original_second' | 'minute'
+
 /** One price tier: video tiers are resolutions (`720p`), image tiers size buckets (`1K`). */
 export interface MediaPriceTier {
   readonly tier: string
-  readonly unit: 'generation' | 'second'
+  readonly unit: PriceUnit
   readonly amount: number
 }
 
@@ -100,7 +113,62 @@ export interface MediaPriceTier {
 export interface MediaPricing {
   readonly currency: string
   readonly tiers: readonly MediaPriceTier[]
-  readonly default?: { readonly unit: 'generation' | 'second'; readonly amount: number }
+  readonly default?: { readonly unit: PriceUnit; readonly amount: number }
+}
+
+/** What an audio model does, as the catalog declares it (`audio.generation_kind`). */
+export const AUDIO_GENERATION_KINDS = ['music', 'podcast', 'speech', 'transcription'] as const
+export type AudioGenerationKind = typeof AUDIO_GENERATION_KINDS[number]
+
+/** How an audio model is billed (`audio.billing_unit`). */
+export type AudioBillingUnit = 'generation' | 'original_second' | 'minute'
+
+/** The reference audio a speech model takes (a voice to imitate), as the catalog declares it. */
+export interface AudioReferenceLimits {
+  readonly min: number
+  readonly max: number
+  readonly maxBytes?: number
+  readonly minSeconds?: number
+  readonly maxSeconds?: number
+  readonly maxTotalSeconds?: number
+  /** Accepted MIME types; absent states no restriction. */
+  readonly mimes?: readonly string[]
+  /** Request fields that may not be sent together with references. */
+  readonly exclusiveWith?: readonly string[]
+  /** The media-library purpose references are uploaded under, when the catalog names one. */
+  readonly purpose?: string
+}
+
+/** One output format a speech model can write, with the sample rates it takes in that format. */
+export interface AudioOutputFormat {
+  readonly format: string
+  readonly sampleRates: readonly number[]
+  readonly defaultSampleRate?: number
+}
+
+/**
+ * An audio model's declared capabilities. Nothing here is assumed: a field the
+ * catalog does not declare is absent, and a model without `generationKind`
+ * cannot be chosen for any kind of generation.
+ */
+export interface AudioCapabilities {
+  readonly generationKind?: AudioGenerationKind
+  /** The request field the main text goes in (`prompt`, `text_prompt`, …). */
+  readonly promptField?: string
+  /** The request fields the model accepts, under their wire names. */
+  readonly requestFields: readonly string[]
+  readonly billingUnit?: AudioBillingUnit
+  readonly references?: AudioReferenceLimits
+  readonly outputFormats?: readonly AudioOutputFormat[]
+  readonly defaultFormat?: string
+  /** Declared choices for enumerated fields (`gender`, `genre`, …), under their wire names. */
+  readonly choices?: Readonly<Record<string, readonly string[]>>
+  readonly maxPromptChars?: number
+  /** Transcription input limits. */
+  readonly maxInputBytes?: number
+  readonly maxInputSeconds?: number
+  readonly inputMimes?: readonly string[]
+  readonly languages?: readonly string[]
 }
 
 /** One media model of the catalog. */
@@ -109,13 +177,16 @@ export interface MediaModel {
   readonly name: string
   readonly description?: string
   readonly kind: MediaKind
-  /** For audio models: what they produce. */
-  readonly audioKind?: 'music' | 'podcast'
+  /** Other ids the gateway answers to for this model. */
+  readonly aliases?: readonly string[]
+  /** For audio models: what they produce, from `audio.generation_kind` only; absent when undeclared. */
+  readonly audioKind?: Exclude<AudioGenerationKind, 'transcription'>
   /** Endpoints the catalog lists for the model. */
   readonly endpoints: readonly string[]
   readonly inputModalities: readonly string[]
   readonly pricing?: MediaPricing
   readonly video?: VideoCapabilities
+  readonly audio?: AudioCapabilities
 }
 
 type Json = Record<string, unknown>
@@ -309,10 +380,109 @@ export function effectiveVideoModes(video: VideoCapabilities): Partial<Record<Vi
   return modes
 }
 
-function parsePricing(value: unknown): MediaPricing | undefined {
+const PRICE_UNITS: readonly PriceUnit[] = ['generation', 'second', 'original_second', 'minute']
+
+/** The audio block: `entry.audio`, else `capabilities.audio`, else the fields flattened into `capabilities`. */
+function audioBlock(entry: Json, capabilities: Json): Json | undefined {
+  const own = record(entry.audio) ?? record(capabilities.audio)
+  if (own !== undefined) return own
+  return field(capabilities, 'generation_kind') !== undefined ? capabilities : undefined
+}
+
+function stringChoices(raw: unknown): Record<string, string[]> | undefined {
+  const choices = record(raw)
+  if (choices === undefined) return undefined
+  const out: Record<string, string[]> = {}
+  for (const [name, values] of Object.entries(choices)) {
+    const items = strings(values)?.map(item => item.trim()).filter(item => item !== '')
+    if (items !== undefined && items.length > 0) out[name] = items
+  }
+  return Object.keys(out).length === 0 ? undefined : out
+}
+
+function parseReferenceLimits(raw: Json | undefined): AudioReferenceLimits | undefined {
+  if (raw === undefined) return undefined
+  const max = count(field(raw, 'max_count')) ?? count(raw.max)
+  if (max === undefined || max === 0) return undefined
+  const min = count(field(raw, 'min_count')) ?? count(raw.min) ?? 0
+  const limits: Record<string, unknown> = { min: Math.min(min, max), max }
+  for (const [key, ...names] of [['maxBytes', 'max_bytes', 'max_size_bytes'], ['minSeconds', 'min_duration_seconds', 'min_seconds'],
+    ['maxSeconds', 'max_duration_seconds', 'max_seconds'], ['maxTotalSeconds', 'max_total_duration_seconds']] as const) {
+    const value = names.map(name => positive(field(raw, name))).find(found => found !== undefined)
+    if (value !== undefined) limits[key] = value
+  }
+  const mimes = list(raw, 'allowed_mimes') ?? list(raw, 'mimes')
+  if (mimes !== undefined && mimes.length > 0) limits.mimes = mimes
+  const exclusive = list(raw, 'mutually_exclusive_with') ?? list(raw, 'exclusive_with')
+  if (exclusive !== undefined && exclusive.length > 0) limits.exclusiveWith = exclusive
+  const purpose = text(field(raw, 'asset_purpose')) ?? text(raw.purpose)
+  if (purpose !== undefined) limits.purpose = purpose
+  return limits as unknown as AudioReferenceLimits
+}
+
+/**
+ * The output formats, in either declared shape: `output_formats: [{format, sample_rates}]`,
+ * or `output_formats: ['wav','mp3']` with `sample_rates: {wav: [...], mp3: [...]}`.
+ */
+function parseOutputFormats(raw: Json): AudioOutputFormat[] | undefined {
+  const declared = field(raw, 'output_formats')
+  if (!Array.isArray(declared)) return undefined
+  const rates = record(field(raw, 'sample_rates'))
+  const formats: AudioOutputFormat[] = []
+  for (const item of declared) {
+    const entry = record(item)
+    const format = (entry === undefined ? text(item) : text(entry.format))?.toLowerCase()
+    if (format === undefined || formats.some(known => known.format === format)) continue
+    const sampleRates = (entry === undefined ? undefined : field(entry, 'sample_rates')) ?? rates?.[format]
+    const valid = Array.isArray(sampleRates) ? sampleRates.filter((rate): rate is number => positive(rate) !== undefined && Number.isInteger(rate)) : []
+    const fallback = entry === undefined ? undefined : positive(field(entry, 'default_sample_rate'))
+    formats.push({ format, sampleRates: valid, ...fallback !== undefined && valid.includes(fallback) ? { defaultSampleRate: fallback } : {} })
+  }
+  return formats.length === 0 ? undefined : formats
+}
+
+/**
+ * Parse an audio capability block.
+ * @param raw - the block.
+ * @returns the declared capabilities; `generationKind` is absent unless declared.
+ */
+export function parseAudioCapabilities(raw: Json): AudioCapabilities {
+  const kindRaw = text(field(raw, 'generation_kind'))?.toLowerCase()
+  const generationKind = (AUDIO_GENERATION_KINDS as readonly string[]).includes(kindRaw ?? '') ? kindRaw as AudioGenerationKind : undefined
+  const billingRaw = text(field(raw, 'billing_unit'))?.toLowerCase()
+  const billingUnit = billingRaw === 'generation' || billingRaw === 'original_second' || billingRaw === 'minute' ? billingRaw : undefined
+  const promptField = text(field(raw, 'prompt_field'))
+  const requestFields = list(raw, 'request_fields') ?? []
+  const references = parseReferenceLimits(record(field(raw, 'references')) ?? record(field(raw, 'reference_audio')))
+  const outputFormats = parseOutputFormats(raw)
+  const defaultFormat = text(field(raw, 'default_format'))?.toLowerCase()
+  const choices = stringChoices(field(raw, 'choices') ?? field(raw, 'field_options'))
+  const result: Record<string, unknown> = { requestFields }
+  if (generationKind !== undefined) result.generationKind = generationKind
+  if (promptField !== undefined) result.promptField = promptField
+  if (billingUnit !== undefined) result.billingUnit = billingUnit
+  if (references !== undefined) result.references = references
+  if (outputFormats !== undefined) result.outputFormats = outputFormats
+  if (defaultFormat !== undefined && outputFormats?.some(format => format.format === defaultFormat) === true) result.defaultFormat = defaultFormat
+  if (choices !== undefined) result.choices = choices
+  for (const [key, ...names] of [['maxPromptChars', 'max_prompt_chars', 'max_text_chars'], ['maxInputBytes', 'max_input_bytes', 'max_file_bytes'],
+    ['maxInputSeconds', 'max_input_seconds', 'max_duration_seconds']] as const) {
+    const value = names.map(name => positive(field(raw, name))).find(found => found !== undefined)
+    if (value !== undefined) result[key] = value
+  }
+  const inputMimes = list(raw, 'input_mimes') ?? list(raw, 'allowed_input_mimes')
+  if (inputMimes !== undefined && inputMimes.length > 0) result.inputMimes = inputMimes
+  const languages = list(raw, 'languages')
+  if (languages !== undefined && languages.length > 0) result.languages = languages
+  return result as unknown as AudioCapabilities
+}
+
+function parsePricing(value: unknown, audioUnit?: AudioBillingUnit): MediaPricing | undefined {
   const raw = record(value)
   if (raw === undefined) return undefined
-  const unit = (item: unknown): 'generation' | 'second' | undefined => item === 'generation' || item === 'second' ? item : undefined
+  // An audio model's price is per its declared billing unit; a price that names none is read in that unit.
+  const unit = (item: unknown): PriceUnit | undefined => PRICE_UNITS.includes(item as PriceUnit) ? item as PriceUnit
+    : item === undefined && audioUnit !== undefined ? audioUnit : undefined
   const tiers: MediaPriceTier[] = []
   if (Array.isArray(raw.tiers)) {
     for (const entry of raw.tiers) {
@@ -335,8 +505,11 @@ function parsePricing(value: unknown): MediaPricing | undefined {
 }
 
 /** Which kind of media model a catalog entry is, or undefined for a chat or internal model. */
-function kindOf(entry: Json, capabilities: Json): MediaKind | undefined {
+function kindOf(entry: Json, capabilities: Json, audio: AudioCapabilities | undefined): MediaKind | undefined {
   if (text(entry.internal_role) !== undefined) return undefined
+  // A declared audio kind decides between generation and transcription.
+  if (audio?.generationKind === 'transcription') return 'transcription'
+  if (audio?.generationKind !== undefined) return 'audio'
   const mediaType = text(entry.media_type)
   if (mediaType === 'video' || mediaType === 'image' || mediaType === 'audio' || mediaType === 'transcription') return mediaType
   if (capabilities.transcription === true || capabilities.realtime_transcription === true) return 'transcription'
@@ -367,25 +540,32 @@ export function parseMediaCatalog(body: unknown): MediaModel[] {
     const id = text(entry?.id)
     if (entry === undefined || id === undefined || seen.has(id)) continue
     const capabilities = record(entry.capabilities) ?? {}
-    const kind = kindOf(entry, capabilities)
+    const audioRaw = audioBlock(entry, capabilities)
+    const audio = audioRaw === undefined ? undefined : parseAudioCapabilities(audioRaw)
+    const kind = kindOf(entry, capabilities, audio)
     if (kind === undefined) continue
     seen.add(id)
     const name = text(entry.display_name) ?? id
     const description = text(entry.description)
-    const pricing = parsePricing(entry.media_pricing)
+    const pricing = parsePricing(entry.media_pricing, audio?.billingUnit)
     const inputModalities = strings(capabilities.input_modalities) ?? strings(entry.input_modalities) ?? []
     const endpoints = strings(capabilities.allowed_endpoints) ?? []
+    const aliases = (strings(entry.aliases) ?? []).map(alias => alias.trim()).filter(alias => alias !== '' && alias !== id)
     let video: VideoCapabilities | undefined
     if (kind === 'video') {
       // The dedicated `video` block takes precedence over legacy fields inside `capabilities`.
       video = { ...parseVideoCapabilities(capabilities), ...parseVideoCapabilities(record(entry.video) ?? {}) }
     }
+    // What an audio model makes is read from its declaration only, never guessed from its name.
+    const audioKind = audio?.generationKind === undefined || audio.generationKind === 'transcription' ? undefined : audio.generationKind
     models.push({
       id, name, kind, endpoints, inputModalities,
+      ...aliases.length === 0 ? {} : { aliases },
       ...description === undefined ? {} : { description },
       ...pricing === undefined ? {} : { pricing },
       ...video === undefined ? {} : { video },
-      ...kind === 'audio' ? { audioKind: /podcast/i.test(id) || /播客/.test(name) ? 'podcast' as const : 'music' as const } : {},
+      ...audio === undefined ? {} : { audio },
+      ...audioKind === undefined ? {} : { audioKind },
     })
   }
   return models

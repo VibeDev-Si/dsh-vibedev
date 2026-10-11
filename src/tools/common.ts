@@ -40,10 +40,14 @@ export function excerpt(prompt: string | undefined, max = 60): string {
  * @returns `Charged ¥4.95.`, an estimate, or the empty string.
  */
 export function moneyLine(record: TaskRecord): string {
-  if (record.status !== 'completed') return record.status === 'failed' ? ' Failed tasks are not charged.' : ''
-  if (record.chargedCny !== undefined) return ` Charged ${yuan(Number(record.chargedCny))}.`
-  if (record.estimatedCny !== undefined) return ` Estimated ${yuan(Number(record.estimatedCny))} (the gateway settles the charge shortly).`
-  return ''
+  if (record.status !== 'completed') return record.status === 'failed' ? ' Failed and cancelled tasks are not charged.' : ''
+  const billed = record.billing?.originalSeconds === undefined ? '' : ` Billed on ${record.billing.originalSeconds.toFixed(1)} s of original audio.`
+  if (record.settlement === 'pending') {
+    return ` The result is saved; the charge is still being settled (it is never generated again — media_tasks shows the charge once settled).${billed}`
+  }
+  if (record.chargedCny !== undefined) return ` Charged ${yuan(Number(record.chargedCny))}.${billed}`
+  if (record.estimatedCny !== undefined) return ` Estimated ${yuan(Number(record.estimatedCny))} (the gateway settles the charge shortly).${billed}`
+  return billed
 }
 
 /**

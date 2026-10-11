@@ -30,8 +30,8 @@ export interface UploadedAsset {
   readonly bytes: number
 }
 
-/** Purposes the plugin uploads under. */
-export type AssetPurpose = 'video_reference'
+/** Purposes the plugin uploads under: references of a video request, and the reference audio of a speech request. */
+export type AssetPurpose = 'video_reference' | 'audio_reference' | (string & {})
 
 /** How long before expiry a cached asset is refreshed instead of reused. */
 const EXPIRY_MARGIN_MS = 10 * 60_000

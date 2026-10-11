@@ -8,7 +8,7 @@ describe('settings page fields', () => {
       .filter(([, schema]) => schema.meta?.volatile === true).map(([key]) => key)
     expect([...FIELDS].sort()).toEqual(live.sort())
     expect(fieldSpecs().map(spec => spec.field)).toEqual([...FIELDS])
-    expect(MODEL_FIELDS).toHaveLength(5)
+    expect(MODEL_FIELDS).toHaveLength(6)
   })
 
   it('stages a switch as true or false and always writes the boolean', () => {

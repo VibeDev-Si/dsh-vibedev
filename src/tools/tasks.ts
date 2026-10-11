@@ -68,8 +68,12 @@ export function mediaTasksTool(runtime: MediaRuntime): ToolDefinition {
       const shown = tasks.slice(0, limit)
       // Make sure every live task is being followed (after a restart, say).
       for (const task of shown) if (!isFinished(task)) void runtime.tracker.follow(task.id).catch(() => undefined)
+      // A finished task whose charge was still settling is asked about again — a query, never a new generation.
+      const current = await Promise.all(shown.map(task => task.status === 'completed' && task.settlement === 'pending'
+        ? runtime.tracker.refresh(task.id, exec.signal).catch(() => task)
+        : task))
       return {
-        tasks: shown.map(task => ({
+        tasks: current.map(task => ({
           id: task.id, kind: task.kind, status: task.status, model: task.model, createdAt: task.createdAt,
           text: describeTask(runtime, exec, task),
         })),

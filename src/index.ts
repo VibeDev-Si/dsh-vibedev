@@ -60,11 +60,13 @@ import { stateDirectory } from './util/files.js'
 
 export { MediaError } from './gateway/errors.js'
 export { MediaHostService } from './service.js'
-export type { HostTarget, MediaTaskView } from './service.js'
+export type { HostTarget, MediaOutputView, MediaTaskView } from './service.js'
+export type { AudioForm, AudioFormField, AudioMakeKind, AudioRequest } from './audio/request.js'
+export type { AudioQuote } from './pricing.js'
 export type { ImageRequest } from './tools/image.js'
 export type { VideoRequest } from './tools/video.js'
 export { parseMediaCatalog } from './gateway/catalog.js'
-export type { MediaModel, VideoCapabilities, VideoMode } from './gateway/catalog.js'
+export type { AudioCapabilities, AudioGenerationKind, MediaModel, PriceUnit, VideoCapabilities, VideoMode } from './gateway/catalog.js'
 export { ACCOUNT_ROUTE_PREFIX, AccountService } from './account/index.js'
 export type { AccountSource, AccountView } from './account/index.js'
 export { GATEWAY_SEARCH_PROVIDER_ID as SEARCH_PROVIDER_ID } from './search/provider.js'
@@ -94,6 +96,7 @@ export interface Config {
   videoModel: Volatile<string>
   musicModel: Volatile<string>
   podcastModel: Volatile<string>
+  speechModel: Volatile<string>
   transcriptionModel: Volatile<string>
   /** Gateway origin. */
   gatewayOrigin: string
@@ -118,6 +121,7 @@ export const Config = Schema.object({
   videoModel: Schema.string().default('').volatile(),
   musicModel: Schema.string().default('').volatile(),
   podcastModel: Schema.string().default('').volatile(),
+  speechModel: Schema.string().default('').volatile(),
   transcriptionModel: Schema.string().default('').volatile(),
   gatewayOrigin: Schema.string().default(DEFAULT_GATEWAY_ORIGIN),
   client: Schema.string().default('vibedev-plugin'),
@@ -136,6 +140,7 @@ export const Config = Schema.object({
     videoModel: '默认视频模型（留空由 Agent 按目录选择）',
     musicModel: '默认音乐模型（留空自动选择）',
     podcastModel: '默认播客模型（留空自动选择）',
+    speechModel: '默认语音合成模型（留空自动选择）',
     transcriptionModel: '默认语音转写模型（留空自动选择）',
     gatewayOrigin: 'VibeDev 网关地址',
     client: '登录时报给网关的客户端名称（决定用量记在哪个密钥下）',
@@ -154,6 +159,7 @@ export const Config = Schema.object({
     videoModel: 'Default video model (empty: the agent chooses from the catalog)',
     musicModel: 'Default music model (empty: chosen automatically)',
     podcastModel: 'Default podcast model (empty: chosen automatically)',
+    speechModel: 'Default speech model (empty: chosen automatically)',
     transcriptionModel: 'Default transcription model (empty: chosen automatically)',
     gatewayOrigin: 'VibeDev gateway address',
     client: 'Client name reported to the gateway at sign-in (decides which key the usage is recorded under)',
@@ -163,9 +169,9 @@ export const Config = Schema.object({
   },
 })
 
-const GUIDANCE = 'VibeDev media tools: image_generate, video_generate, audio_generate (music or a podcast) and audio_transcribe create and transcribe media '
+const GUIDANCE = 'VibeDev media tools: image_generate, video_generate, audio_generate (music, a podcast or speech) and audio_transcribe create and transcribe media '
   + 'with the user\'s VibeDev account; media_models lists models and prices. Use them on your own judgment whenever generated media serves the request '
-  + '(illustrations, product shots, storyboard frames, short clips, background music, a podcast episode), not only when a tool is named. '
+  + '(illustrations, product shots, storyboard frames, short clips, background music, a podcast episode, a voice-over), not only when a tool is named. '
   + 'They spend the user\'s balance, so make what the request needs rather than speculative variations. Results are saved in the workspace under media/. '
   + 'Pass files the user attached in this chat as chat:1 (the most recent), chat:2, and so on. Video and audio run as background jobs: '
   + 'carry on and let the job notification report the result.'
@@ -201,7 +207,7 @@ export function apply(ctx: Context, config: Config): void {
   const tracker = new TaskTracker({ http, store, log: warn })
   const slots: Readonly<Record<ModelSlot, Volatile<string>>> = {
     image: config.imageModel, video: config.videoModel, music: config.musicModel,
-    podcast: config.podcastModel, transcription: config.transcriptionModel,
+    podcast: config.podcastModel, speech: config.speechModel, transcription: config.transcriptionModel,
   }
   const runtime = new MediaRuntime({
     http, store, tracker, stateDir,
