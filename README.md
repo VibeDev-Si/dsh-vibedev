@@ -160,6 +160,8 @@ Everything is paid from your VibeDev balance; the DeepSeek account stays DeepSee
 
 **Creator tools withdrawn (0.2.5)**: the Creator tools line 0.2.4 added at the end of Settings → VibeDev account is gone. It was a cross-plugin recommendation slot, and in the settings page it hurt the layout; a redesign can revisit it later. Only that interface change is reverted: the account, the balance, the model list, the sign-in and saved screenplays, boards and film files are untouched.
 
+**Gateway audio (0.3.1)**: audio models are recognized from the catalog's structured `audio` block (music, podcast, speech, transcription), never from their names; speech generation (Seed) joins music and podcasts; prices show their unit (per generation, per second of original audio, per minute) and "not priced" when the catalog states none; the `vibedevMedia` service gains `startAudio` with an operation key and query-only result reading.
+
 **Models**: the list comes from the VibeDev gateway for your account, so nothing is listed before you sign in; models appear right after, without a restart. Using a VibeDev model while signed out, or after the sign-in has ended, asks you to sign in; a used-up balance says so with the top-up link. These messages are separate from the DeepSeek account's. An expired access token is renewed and the request sent again, without repeating any output.
 
 **Web search**: the plugin registers the web search provider `vibedev-gateway`, signed in with your VibeDev account. Registering does not select it: DeepSeek Harness keeps its own search unless the profile sets `searchProvider: vibedev-gateway` on the `web` row (the VibeDev app does). Searching is free, but the gateway refuses every request, searches included, while the balance is zero.
