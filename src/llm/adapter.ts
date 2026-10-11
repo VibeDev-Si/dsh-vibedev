@@ -119,6 +119,8 @@ export interface GatewayAdapterOptions {
   readonly resolveAttachments?: () => AttachmentStore | undefined
   readonly resolveImageAccess?: (attachments: AttachmentStore, ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined
   readonly onReplayDegrade?: (detail: { provider: string; model: string; reason: string }) => void
+  /** A request reached the gateway and ended, however it ended: it may have been charged. */
+  readonly onRequestEnded?: () => void
 }
 
 /** One catalog's frozen view: the catalog, its index, and the collection built from it. */
@@ -264,6 +266,7 @@ export class GatewayAdapter extends LlmAdapter {
     const upstream = options.signal === undefined ? consumer.signal : AbortSignal.any([options.signal, consumer.signal])
     const streamIdleTimeoutMs = this.config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
     using watchdog = idleWatchdog(upstream, streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
+    let answered = false
 
     try {
       const containsImage = options.messages.some(message => contentHasImage(message.content))
@@ -299,6 +302,7 @@ export class GatewayAdapter extends LlmAdapter {
           const url = input instanceof Request ? input.url : String(input)
           if (new URL(url).origin !== snapshot.origin) throw new Error('Refusing a model request to another gateway origin.')
           const received = await fetch(input, { ...init, redirect: 'error' })
+          answered = true
           response = { status: received.status, headers: Object.fromEntries(received.headers.entries()) }
           return received
         }
@@ -389,6 +393,10 @@ export class GatewayAdapter extends LlmAdapter {
       throw error
     } finally {
       consumer.abort('gateway stream consumer stopped')
+      // Only a request the gateway answered can have cost anything.
+      if (answered) {
+        try { this.config.onRequestEnded?.() } catch { /* a listener cannot change the outcome */ }
+      }
     }
   }
 

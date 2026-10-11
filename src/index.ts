@@ -72,6 +72,9 @@ export type { AccountSource, AccountView } from './account/index.js'
 export { GATEWAY_SEARCH_PROVIDER_ID as SEARCH_PROVIDER_ID } from './search/provider.js'
 export { INSUFFICIENT_BALANCE_CODE, SIGN_IN_REQUIRED_CODE, VIBEDEV_ROUTE } from './llm/index.js'
 
+/** Requests that are charged: generations and transcriptions (uploads and reads are free). */
+const PAID_PATH = /^\/v1\/(?:images|videos|audio)(?:\/|$)/
+
 /** The package version, sent in the `User-Agent` the gateway attributes plugin traffic by. */
 export const version: string = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 
@@ -198,13 +201,17 @@ export function apply(ctx: Context, config: Config): void {
     account: () => ctx.get('deepseekAccount'),
     apiKey: () => developmentKey(origin, config.apiKeyEnv),
   })
+  // Charges change the balance: the account pages read it again right after a paid request ends.
+  let account: AccountService | undefined
+  const spent = (): void => { account?.spent() }
   const http = new GatewayHttp({
     origin, userAgent,
     resolveCredential: () => chain.resolve(),
     rejectToken: credential => chain.reject(credential),
+    onAccepted: ({ method, path }) => { if (method === 'POST' && PAID_PATH.test(path)) spent() },
   })
   const store = new TaskStore(gatewayStateDirectory(stateDir, origin))
-  const tracker = new TaskTracker({ http, store, log: warn })
+  const tracker = new TaskTracker({ http, store, log: warn, onFinished: spent })
   const slots: Readonly<Record<ModelSlot, Volatile<string>>> = {
     image: config.imageModel, video: config.videoModel, music: config.musicModel,
     podcast: config.podcastModel, speech: config.speechModel, transcription: config.transcriptionModel,
@@ -249,6 +256,7 @@ export function apply(ctx: Context, config: Config): void {
       preferredModels: () => config.preferredModels,
       onCredentialChange: listener => login.onChange(listener),
       catalogRefreshMinutes: config.catalogRefreshMinutes,
+      onRequestEnded: spent,
     })
     llmCtx.effect(() => () => { route = undefined }, 'dsh-vibedev: route state')
   })
@@ -269,21 +277,23 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   // The account pages' routes (sidebar status, Settings → VibeDev 账号).
-  const account = new AccountService({
+  const accountService = new AccountService({
     origin, userAgent, chain, login, primary: config.primary,
     models: () => ({ count: route?.models().length ?? 0, ...route?.hidden() === undefined ? {} : { hidden: route.hidden() } }),
   })
+  account = accountService
   ctx.inject(['connection'], (scoped) => {
-    for (const accountRoute of accountRoutes(account)) {
+    for (const accountRoute of accountRoutes(accountService)) {
       scoped.effect(() => scoped.connection.fetch.register(accountRoute), `dsh-vibedev: ${accountRoute.path}`)
     }
   })
 
   ctx.effect(() => {
     void tracker.resume().catch((error: unknown) => { warn(`dsh-vibedev: resuming tasks failed: ${String(error)}`) })
-    const unsubscribe = login.onChange(() => { runtime.invalidateCatalog() })
+    const unsubscribe = login.onChange(() => { runtime.invalidateCatalog(); accountService.credentialChanged() })
     return () => {
       unsubscribe()
+      accountService.dispose()
       tracker.dispose()
       login.dispose()
     }
@@ -295,7 +305,10 @@ export function apply(ctx: Context, config: Config): void {
       const controller = new AbortController()
       void (async () => {
         try {
-          for await (const _view of accountCtx.deepseekAccount.watch(controller.signal)) runtime.invalidateCatalog()
+          for await (const _view of accountCtx.deepseekAccount.watch(controller.signal)) {
+            runtime.invalidateCatalog()
+            accountService.credentialChanged()
+          }
         } catch {
           // The watch ends with the account service; nothing to recover.
         }

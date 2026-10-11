@@ -97,6 +97,7 @@
 - 图片按张计费，视频按秒计费（参考视频的时长也计入），音乐和播客按次计费，语音按原始秒计费（按服务商返回的原始时长，可能和播放时长不同），转写按分钟计费。`media_models` 会列出当前价格；目录没有给出价格的模型显示「未定价」，不代表免费。
 - 视频和音频只在成功时扣费，失败和取消的任务不扣。视频提交后无法取消。
 - 同一次操作只会生成一次：提交没有得到确认时，会用同一个请求键向网关确认结果；查询或下载失败只会重新查询、刷新链接，不会重新提交。结果已经生成、但费用还在结算（`settlement_pending`）时，结果照常保存，不会重新生成。
+- 余额在每次付费请求结束后（对话回复、生成、转写）马上重新读取，侧栏和设置页几秒内就能看到扣费后的余额。
 - 插件设置里的「每次付费生成前先询问」默认关闭。打开后，每次付费的媒体请求之前都会先弹出确认，并显示预估金额。
 
 ## 设置
@@ -161,6 +162,8 @@ Everything is paid from your VibeDev balance; the DeepSeek account stays DeepSee
 **Creator tools withdrawn (0.2.5)**: the Creator tools line 0.2.4 added at the end of Settings → VibeDev account is gone. It was a cross-plugin recommendation slot, and in the settings page it hurt the layout; a redesign can revisit it later. Only that interface change is reverted: the account, the balance, the model list, the sign-in and saved screenplays, boards and film files are untouched.
 
 **Gateway audio (0.3.1)**: audio models are recognized from the catalog's structured `audio` block (music, podcast, speech, transcription), never from their names; speech generation (Seed) joins music and podcasts; prices show their unit (per generation, per second of original audio, per minute) and "not priced" when the catalog states none; the `vibedevMedia` service gains `startAudio` with an operation key and query-only result reading.
+
+**Balance without the wait (0.3.2)**: the balance is read again right after a paid request ends (a chat reply, a generation, a transcription) and the account pages hear it through a long poll, so a charge shows within seconds instead of after up to two minutes. A page that already has a balance is answered at once while a newer one is read behind it; reads after charges are at least five seconds apart.
 
 **Models**: the list comes from the VibeDev gateway for your account, so nothing is listed before you sign in; models appear right after, without a restart. Using a VibeDev model while signed out, or after the sign-in has ended, asks you to sign in; a used-up balance says so with the top-up link. These messages are separate from the DeepSeek account's. An expired access token is renewed and the request sent again, without repeating any output.
 

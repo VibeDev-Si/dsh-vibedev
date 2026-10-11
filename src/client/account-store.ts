@@ -2,8 +2,11 @@
  * The VibeDev account as the browser half sees it: one store the Settings
  * section and the sidebar status share. It reads the Host route
  * (`GET /api/dsh-vibedev/account`) on start, every 2 s while a sign-in waits
- * for the browser, every minute otherwise, and whenever the window regains
- * focus; the actions call the sign-in, cancel and sign-out routes.
+ * for the browser, and whenever the window regains focus. Otherwise it keeps a
+ * long poll open (`?since=<revision>`), which the Host answers as soon as the
+ * balance or the person changes — a charge shows within seconds; a Host
+ * without long polls is read every minute. The actions call the sign-in,
+ * cancel and sign-out routes.
  *
  * Kept free of React and of the DOM beyond `fetch` and timers (both
  * injectable) so it can be tested in node.
@@ -31,6 +34,8 @@ export interface AccountView {
   readonly links: { readonly topUp: string; readonly register: string; readonly usage: string }
   /** The VibeDev account is the app's main account (absent from older Hosts: not). */
   readonly primary?: boolean
+  /** Grows with every change of the person or the balance; a Host that sends it answers `?since=` long polls. */
+  readonly revision?: number
 }
 
 /** What the pages render. */
@@ -49,6 +54,8 @@ export const ACCOUNT_ROUTE = '/api/dsh-vibedev/account'
 
 const PENDING_POLL_MS = 2_000
 const IDLE_POLL_MS = 60_000
+/** After a failed long poll, the next one waits this long (the Host may be restarting). */
+const WATCH_RETRY_MS = 5_000
 
 /** Injectable environment. */
 export interface AccountStoreOptions {
@@ -82,6 +89,8 @@ export class AccountStore {
   private reading: Promise<void> | undefined
   private stopped = true
   private unsubscribeFocus: (() => void) | undefined
+  /** The open long poll, when one is. */
+  private watching: AbortController | undefined
 
   /**
    * @param options - fetch, timers, window opening and focus (test seams).
@@ -124,16 +133,55 @@ export class AccountStore {
     this.unsubscribeFocus = undefined
     if (this.timer !== undefined) (this.options.clearTimeout ?? ((handle: unknown) => { globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>) }))(this.timer)
     this.timer = undefined
+    this.watching?.abort()
+    this.watching = undefined
+  }
+
+  private later(callback: () => void, ms: number): void {
+    if (this.timer !== undefined) (this.options.clearTimeout ?? ((handle: unknown) => { globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>) }))(this.timer)
+    this.timer = (this.options.setTimeout ?? ((run: () => void, delay: number) => globalThis.setTimeout(run, delay)))(() => {
+      this.timer = undefined
+      callback()
+    }, ms)
   }
 
   private schedule(): void {
     if (this.stopped) return
-    if (this.timer !== undefined) (this.options.clearTimeout ?? ((handle: unknown) => { globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>) }))(this.timer)
-    const delay = this.state.view?.pending !== undefined ? PENDING_POLL_MS : IDLE_POLL_MS
-    this.timer = (this.options.setTimeout ?? ((callback: () => void, ms: number) => globalThis.setTimeout(callback, ms)))(() => {
+    const view = this.state.view
+    // A Host that counts revisions tells us about changes as they happen; a waiting sign-in keeps its quick pace.
+    if (view?.pending === undefined && typeof view?.revision === 'number') {
+      if (this.timer !== undefined) (this.options.clearTimeout ?? ((handle: unknown) => { globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>) }))(this.timer)
       this.timer = undefined
-      void this.refresh()
-    }, delay)
+      this.watch(view.revision)
+      return
+    }
+    this.watching?.abort()
+    this.watching = undefined
+    this.later(() => { void this.refresh() }, view?.pending !== undefined ? PENDING_POLL_MS : IDLE_POLL_MS)
+  }
+
+  /** Keep one long poll open for changes past `revision`. */
+  private watch(revision: number): void {
+    if (this.watching !== undefined) return
+    const controller = new AbortController()
+    this.watching = controller
+    void (async () => {
+      let failed = false
+      try {
+        const response = await this.fetch(`${ACCOUNT_ROUTE}?since=${revision}`, { signal: controller.signal })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const view = await response.json() as AccountView
+        // A direct read may already have shown something newer.
+        if (!controller.signal.aborted && (view.revision ?? 0) >= (this.state.view?.revision ?? 0)) this.set({ view, loadFailed: false })
+      } catch {
+        failed = !controller.signal.aborted
+      } finally {
+        if (this.watching === controller) this.watching = undefined
+      }
+      if (this.stopped || controller.signal.aborted) return
+      if (failed) this.later(() => { void this.refresh() }, WATCH_RETRY_MS)
+      else this.schedule()
+    })()
   }
 
   /**

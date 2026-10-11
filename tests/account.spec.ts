@@ -42,6 +42,7 @@ describe('AccountService', () => {
       models: { count: 0, hidden: 'signed-out' },
       links: { topUp: `${ORIGIN}/purchase`, register: ORIGIN, usage: `${ORIGIN}/usage` },
       primary: false,
+      revision: 0,
     })
     expect(fetch).not.toHaveBeenCalled()
   })
@@ -71,14 +72,14 @@ describe('AccountService', () => {
     expect((await account.view()).source).toBe('host')
   })
 
-  it('reuses a balance read for a minute unless a fresh one is asked for', async () => {
+  it('reuses a recent balance read, answers an older one at once while reading again behind it, and reads fresh on request', async () => {
     const { account, fetch, advance } = bench({ token: 'vdat_1', kind: 'plugin' })
     await account.view()
     await account.view()
     expect(fetch).toHaveBeenCalledTimes(1)
     await account.view(true)
     expect(fetch).toHaveBeenCalledTimes(2)
-    advance(61_000)
+    advance(31_000)
     await account.view()
     expect(fetch).toHaveBeenCalledTimes(3)
   })

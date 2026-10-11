@@ -57,6 +57,8 @@ export interface GatewayModelsOptions {
   readonly catalogRefreshMinutes?: number
   readonly catalogTimeoutMs?: number
   readonly cacheRetention?: 'none' | 'short' | 'long'
+  /** A model request that may have been charged ended (the account reads the balance again). */
+  readonly onRequestEnded?: () => void
 }
 
 /** The route's live state, for status lines and tests. */
@@ -123,6 +125,7 @@ export function installGatewayModels(ctx: Context, options: GatewayModelsOptions
     onReplayDegrade: ({ provider, model, reason }) => {
       ctx.logger.warn(`dsh-vibedev: unusable replay state on assistant history for "${provider}/${model}"; sending provider-neutral content (${reason})`)
     },
+    ...options.onRequestEnded === undefined ? {} : { onRequestEnded: options.onRequestEnded },
   })
   const registration = ctx.llm.registerAdapter([VIBEDEV_ROUTE], adapter)
   // The Models page lists configurable providers under their settings namespace (this entry's id);

@@ -34,6 +34,8 @@ export interface GatewayHttpOptions {
   readonly userAgent: string
   readonly fetch?: typeof globalThis.fetch
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
+  /** Told about every request the gateway accepted (2xx), after the fact. */
+  readonly onAccepted?: (request: { readonly method: string; readonly path: string }) => void
 }
 
 /** One request. */
@@ -131,7 +133,12 @@ export class GatewayHttp {
     let busyRetries = request.busyRetries ?? 2
     for (;;) {
       const response = await this.attempt(url, request, credential)
-      if (response.ok) return response
+      if (response.ok) {
+        if (authenticate) {
+          try { this.options.onAccepted?.({ method: request.method ?? 'GET', path: new URL(url).pathname }) } catch { /* an observer cannot change the answer */ }
+        }
+        return response
+      }
       const failure = parseGatewayFailure(await response.clone().json().catch(() => undefined))
       if (response.status === 401 && credential !== undefined && credential.kind !== 'key' && !refreshed) {
         refreshed = true

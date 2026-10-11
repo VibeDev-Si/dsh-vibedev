@@ -57,6 +57,8 @@ export interface TrackerOptions {
   readonly maxDownloadBytes?: number
   /** A claim not renewed for this long is taken over by another process. Defaults to 60 seconds. */
   readonly claimStaleMs?: number
+  /** Told when a task ends (completed, failed or lost). */
+  readonly onFinished?: (record: TaskRecord) => void
 }
 
 interface KindSpec {
@@ -401,7 +403,10 @@ export class TaskTracker {
 
   private async finish(id: string, patch: Partial<Omit<TaskRecord, 'id' | 'kind' | 'createdAt'>>): Promise<TaskRecord> {
     this.downloadFailures.delete(id)
-    return this.update(id, { ...patch, progress: undefined, finishedAt: this.now() })
+    const record = await this.update(id, { ...patch, progress: undefined, finishedAt: this.now() })
+    // The charge (or the release of a held amount) settles as the task ends.
+    try { this.options.onFinished?.(record) } catch { /* an observer cannot change the outcome */ }
+    return record
   }
 
   /** Hold (or keep) this process's claim on a task, renewing it while held. */
