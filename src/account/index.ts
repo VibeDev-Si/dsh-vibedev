@@ -36,8 +36,12 @@ export const ACCOUNT_ROUTE_PREFIX = '/api/dsh-vibedev/account'
  */
 const BALANCE_TTL_MS = 30_000
 
-/** How long `?since=` holds a request open when nothing changes. */
-const WAIT_MS = 25_000
+/**
+ * How long `?since=` holds a request open when nothing changes. The app installs an update only after open
+ * requests finish and waits at most 10 s for them, so this stays well below that (0.3.2 held 25 s, and an
+ * update failed with "task inspection timed out" whenever the poll had more than 10 s to go).
+ */
+const WAIT_MS = 8_000
 
 /**
  * When the balance is read again after a charge: the gateway settles a charge

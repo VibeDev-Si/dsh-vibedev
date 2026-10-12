@@ -146,12 +146,14 @@ describe('balance after a charge', () => {
     expect((await account.view()).balance?.amount).toBe('5.00')
   })
 
-  it('a long poll with nothing new ends after a while, and ends at once when the page goes away', async () => {
+  // The app installs an update only once open requests have finished, and waits at most 10 s: a long poll
+  // must end well within that, or an update fails with "task inspection timed out" (0.3.2 held 25 s).
+  it('a long poll with nothing new ends within 8 s, and ends at once when the page goes away', async () => {
     const { account, time } = bench()
     const { revision } = await account.view()
     let ended = false
     void account.wait(revision).then(() => { ended = true })
-    await time.run(24_000)
+    await time.run(7_000)
     expect(ended).toBe(false)
     await time.run(1_000)
     expect(ended).toBe(true)
