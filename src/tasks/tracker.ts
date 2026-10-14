@@ -531,22 +531,31 @@ export class TaskTracker {
     return Math.min(60_000, 5_000 * 2 ** Math.min(failures - 1, 4))
   }
 
-  /** The money and billing facts of a gateway answer, merged into what the record already knows. */
+  /**
+   * The money and billing facts of a gateway answer, merged into what the record already knows.
+   *
+   * An explicit status decides: `pending` records no charge (a charge reported
+   * alongside it is not final, and the task is not free either) and drops one
+   * recorded earlier; `settled` records the charge exactly as given. Only an
+   * answer that carries no billing or settlement status at all — older gateways —
+   * lets a charge imply `settled`. An answer that says nothing leaves what the
+   * record holds, so a settled task is never downgraded by it.
+   */
   private moneyOf(record: TaskRecord, task: RemoteTask): Partial<TaskRecord> {
-    // A charge reported while settlement is still pending is not final, and not a free task either.
-    const charged = task.settlement === 'pending' ? undefined : task.chargedCny
-    const settlement = task.settlement ?? (charged !== undefined ? 'settled' : undefined)
-    const billing = task.billedOriginalSeconds !== undefined || task.billedMinutes !== undefined ? {
+    const settlement = task.settlement ?? (!task.billingStatusReported && task.chargedCny !== undefined ? 'settled' : undefined)
+    const billed = task.billedOriginalSeconds !== undefined || task.billedMinutes !== undefined || task.billedTokens !== undefined
+    const billing = billed ? {
       billing: {
         ...record.billing,
         ...task.billedOriginalSeconds === undefined ? {} : { originalSeconds: task.billedOriginalSeconds },
         ...task.billedMinutes === undefined ? {} : { minutes: task.billedMinutes },
+        ...task.billedTokens === undefined ? {} : { tokens: task.billedTokens },
       },
     } : {}
     return {
       ...task.estimatedCny === undefined ? {} : { estimatedCny: task.estimatedCny },
-      ...charged === undefined ? {} : { chargedCny: charged },
-      ...settlement === undefined ? {} : { settlement },
+      ...settlement === 'pending' ? { settlement, chargedCny: undefined, settlementPendingReason: task.settlementPendingReason } : {},
+      ...settlement === 'settled' ? { settlement, settlementPendingReason: undefined, ...task.chargedCny === undefined ? {} : { chargedCny: task.chargedCny } } : {},
       ...billing,
     }
   }

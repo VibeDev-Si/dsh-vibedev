@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { effectiveVideoModes, parseMediaCatalog } from '../src/gateway/catalog.js'
-import { CATALOG, LIVE_CATALOG } from './fixtures.js'
+import { CATALOG, LIVE_CATALOG, TOKEN_CATALOG } from './fixtures.js'
 
 const models = parseMediaCatalog(CATALOG)
 const byId = (id: string) => {
@@ -71,6 +71,111 @@ describe('parseMediaCatalog', () => {
     const video = byId('future-video').video ?? {}
     expect(video.unreadableModesVersion).toBe(2)
     expect(effectiveVideoModes(video)).toEqual({})
+  })
+})
+
+describe('video Token pricing (video_pricing, schema 1)', () => {
+  const token = parseMediaCatalog(TOKEN_CATALOG)
+  const tokenModel = (id: string) => {
+    const model = token.find(item => item.id === id)
+    if (model === undefined) throw new Error(`missing ${id}`)
+    return model
+  }
+  const one = (pricing: unknown) => parseMediaCatalog({ data: [{ id: 'v', media_type: 'video', video_pricing: pricing }] })[0]!
+  const base = { schema_version: 1, currency: 'CNY', final_basis: 'provider_tokens', estimate_basis: 'output_plus_reference_video_seconds', estimate_only: true }
+
+  it('reads the rules, keeping false conditions and leaving null or absent ones out (any)', () => {
+    const model = tokenModel('video-sd-2.5(TC)')
+    expect(model.videoPricingIssue).toBeUndefined()
+    expect(model.pricing).toBeUndefined()
+    expect(model.videoPricing).toStrictEqual({
+      schemaVersion: 1, currency: 'CNY', finalBasis: 'provider_tokens', estimateBasis: 'output_plus_reference_video_seconds', estimateOnly: true,
+      rules: [
+        { resolution: '480p', referenceVideo: false, pricePerMillionTokensCny: 60.06, estimatedPricePerSecondCny: 0.5819 },
+        { resolution: '480p', referenceVideo: true, pricePerMillionTokensCny: 36.036, estimatedPricePerSecondCny: 0.6952 },
+        { resolution: '720p', referenceVideo: false, pricePerMillionTokensCny: 70, estimatedPricePerSecondCny: 1.25 },
+        { resolution: '720p', referenceVideo: true, pricePerMillionTokensCny: 42, estimatedPricePerSecondCny: 1.5 },
+      ],
+    })
+    // null on the wire is "any": no key at all, while false stays false.
+    const rule = tokenModel('video-sd-2.0(TC)').videoPricing?.rules[0]
+    expect(rule).toStrictEqual({ resolution: '480p', referenceVideo: false, pricePerMillionTokensCny: 40.04, estimatedPricePerSecondCny: 0.3971 })
+    expect(Object.hasOwn(rule ?? {}, 'referenceAudio')).toBe(false)
+    expect(Object.hasOwn(rule ?? {}, 'referenceImage')).toBe(false)
+    // An absent per-second estimate stays absent (unknown), never zero.
+    expect(tokenModel('video-token-no-estimate').videoPricing?.rules).toStrictEqual([{ resolution: '480p', pricePerMillionTokensCny: 50 }])
+  })
+
+  it('accepts camelCase like the other catalog fields, and zero prices', () => {
+    expect(one({
+      schemaVersion: 1, currency: 'CNY', finalBasis: 'provider_tokens', estimateBasis: 'output_plus_reference_video_seconds', estimateOnly: false,
+      rules: [{ resolution: '720p', referenceImage: true, referenceAudio: false, pricePerMillionTokens: 0, estimatedPricePerSecond: 0 }],
+    }).videoPricing).toStrictEqual({
+      schemaVersion: 1, currency: 'CNY', finalBasis: 'provider_tokens', estimateBasis: 'output_plus_reference_video_seconds', estimateOnly: false,
+      rules: [{ resolution: '720p', referenceAudio: false, referenceImage: true, pricePerMillionTokensCny: 0, estimatedPricePerSecondCny: 0 }],
+    })
+  })
+
+  it('keeps the id and the pricing when only the display name changes', () => {
+    const entry = TOKEN_CATALOG.data[0]!
+    const renamed = parseMediaCatalog({ data: [{ ...entry, display_name: 'Seedance 2.5 renamed' }] })[0]!
+    expect(renamed.id).toBe('video-sd-2.5(TC)')
+    expect(renamed.name).toBe('Seedance 2.5 renamed')
+    expect(renamed.videoPricing?.rules).toHaveLength(4)
+    expect(renamed.videoPricing).toStrictEqual(tokenModel('video-sd-2.5(TC)').videoPricing)
+  })
+
+  it('marks an unknown schema version instead of reading it, and keeps the legacy price apart', () => {
+    const model = tokenModel('video-token-future')
+    expect(model.videoPricingIssue).toBe('unknown-schema')
+    expect(model.videoPricing).toBeUndefined()
+    expect(model.pricing).toEqual({ currency: 'CNY', tiers: [], default: { unit: 'second', amount: 0.5 } })
+    expect(one({ ...base, schema_version: '1', rules: [] }).videoPricingIssue).toBe('unknown-schema')
+    expect(one({ ...base, schema_version: undefined, rules: [] }).videoPricingIssue).toBe('unknown-schema')
+  })
+
+  it('marks the whole object invalid when one rule is unreadable, rather than dropping the rule', () => {
+    expect(tokenModel('video-token-broken')).toMatchObject({ videoPricingIssue: 'invalid' })
+    expect(tokenModel('video-token-broken').videoPricing).toBeUndefined()
+  })
+
+  const rule = { resolution: '480p', price_per_million_tokens: 60.06, estimated_price_per_second: 0.5819 }
+  it.each([
+    ['a non-object', 'per second'],
+    ['an array', []],
+    ['rules missing', { ...base }],
+    ['rules empty', { ...base, rules: [] }],
+    ['rules not a list', { ...base, rules: { 0: rule } }],
+    ['a rule not an object', { ...base, rules: [rule, 'x'] }],
+    ['another currency', { ...base, currency: 'USD', rules: [rule] }],
+    ['another final basis', { ...base, final_basis: 'seconds', rules: [rule] }],
+    ['another estimate basis', { ...base, estimate_basis: 'output_seconds', rules: [rule] }],
+    ['estimate_only missing', { ...base, estimate_only: undefined, rules: [rule] }],
+    ['an empty resolution', { ...base, rules: [{ ...rule, resolution: ' ' }] }],
+    ['a condition that is not a boolean', { ...base, rules: [{ ...rule, reference_audio: 1 }] }],
+    ['a missing Token price', { ...base, rules: [{ resolution: '480p', estimated_price_per_second: 0.5 }] }],
+    ['a negative Token price', { ...base, rules: [{ ...rule, price_per_million_tokens: -1 }] }],
+    ['a Token price as text', { ...base, rules: [{ ...rule, price_per_million_tokens: '60.06' }] }],
+    ['a negative per-second estimate', { ...base, rules: [{ ...rule, estimated_price_per_second: -0.1 }] }],
+    ['a per-second estimate as text', { ...base, rules: [{ ...rule, estimated_price_per_second: '0.5' }] }],
+  ])('marks %s invalid', (_label, pricing) => {
+    const model = one(pricing)
+    expect(model.videoPricingIssue).toBe('invalid')
+    expect(model.videoPricing).toBeUndefined()
+  })
+
+  it('treats a null video_pricing as absent', () => {
+    const model = one(null)
+    expect(Object.hasOwn(model, 'videoPricing')).toBe(false)
+    expect(Object.hasOwn(model, 'videoPricingIssue')).toBe(false)
+  })
+
+  it('leaves models with only a legacy media_pricing exactly as before', () => {
+    for (const model of [...models, ...parseMediaCatalog(LIVE_CATALOG)]) {
+      expect(Object.hasOwn(model, 'videoPricing')).toBe(false)
+      expect(Object.hasOwn(model, 'videoPricingIssue')).toBe(false)
+    }
+    expect(byId('seedance-2.0').pricing).toEqual({ currency: 'CNY', tiers: [{ tier: '720p', unit: 'second', amount: 0.99 }] })
   })
 })
 

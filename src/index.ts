@@ -62,11 +62,16 @@ export { MediaError } from './gateway/errors.js'
 export { MediaHostService } from './service.js'
 export type { HostTarget, MediaOutputView, MediaTaskView } from './service.js'
 export type { AudioForm, AudioFormField, AudioMakeKind, AudioRequest } from './audio/request.js'
-export type { AudioQuote } from './pricing.js'
+export type {
+  AudioQuote, Bilingual, VideoLegacyEstimate, VideoQuote, VideoQuoteReason, VideoQuoteRequest, VideoQuoteRule,
+  VideoQuoteUnavailable, VideoTokenEstimate,
+} from './pricing.js'
 export type { ImageRequest } from './tools/image.js'
 export type { VideoRequest } from './tools/video.js'
 export { parseMediaCatalog } from './gateway/catalog.js'
-export type { AudioCapabilities, AudioGenerationKind, MediaModel, PriceUnit, VideoCapabilities, VideoMode } from './gateway/catalog.js'
+export type {
+  AudioCapabilities, AudioGenerationKind, MediaModel, PriceUnit, VideoCapabilities, VideoMode, VideoPricingIssue, VideoTokenPricing, VideoTokenRule,
+} from './gateway/catalog.js'
 export { ACCOUNT_ROUTE_PREFIX, AccountService } from './account/index.js'
 export type { AccountSource, AccountView } from './account/index.js'
 export { GATEWAY_SEARCH_PROVIDER_ID as SEARCH_PROVIDER_ID } from './search/provider.js'

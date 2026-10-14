@@ -4,6 +4,11 @@
  * receipt and `asset`), and `POST /v1/audio/generations` and
  * `GET /v1/audio/generations/{id}` (`outputs[]`). Unknown statuses count as
  * still running; only an explicit terminal status ends a task.
+ *
+ * Both kinds carry the same settlement facts in `effective`: `billing_status`
+ * (`pending`/`settled`), `billing_pending_reason`, `charged_cny` (kept as the
+ * exact string given), `billed_tokens` and `estimated_cny`. A completed task
+ * whose billing is pending has its result; only the charge is still to come.
  * @module dsh-vibedev/tasks/remote
  */
 
@@ -35,10 +40,23 @@ export interface RemoteTask {
   readonly error?: { readonly code: string; readonly message: string }
   /** Estimated price at submission (CNY, two decimals). */
   readonly estimatedCny?: string
-  /** Settled charge (CNY); absent until the gateway settles, which is not the same as free. */
+  /**
+   * Charge (CNY) exactly as the gateway wrote it (`3.98066354`); absent until the gateway
+   * reports one, which is not the same as free. Final only while `settlement` is not `pending`.
+   */
   readonly chargedCny?: string
-  /** Whether the charge of a finished task has settled; absent when the gateway does not say. */
+  /**
+   * Whether the charge of a finished task has settled: `effective.billing_status`,
+   * `settlement_state`/`settlement_status` or the status `settlement_pending`. An explicit
+   * pending wins over anything else in the same answer. Absent when no known word is given.
+   */
   readonly settlement?: 'pending' | 'settled'
+  /** The answer carried a billing or settlement status at all (older gateways send none). */
+  readonly billingStatusReported: boolean
+  /** Why the settlement is pending (`billing_pending_reason`). */
+  readonly settlementPendingReason?: string
+  /** The billable video Tokens the charge is based on (`billed_tokens`). */
+  readonly billedTokens?: number
   /** The billed original length of the whole task, in seconds (speech). */
   readonly billedOriginalSeconds?: number
   /** The billed input length, in minutes (transcription). */
@@ -80,20 +98,59 @@ const seconds = (value: unknown): number | undefined => {
   return typeof number === 'number' && Number.isFinite(number) && number > 0 ? number : undefined
 }
 
-/** The billing facts of a task: whether the charge settled, and the billed length. */
-function billing(raw: Json, status: string): Pick<RemoteTask, 'settlement' | 'billedOriginalSeconds' | 'billedMinutes'> {
-  const blocks = [record(raw.billing), record(raw.usage), record(raw.effective), raw].filter((block): block is Json => block !== undefined)
-  const pick = (...names: string[]): unknown => {
-    for (const block of blocks) for (const name of names) if (block[name] !== undefined) return block[name]
-    return undefined
+/** The blocks billing facts are read from, in order: `billing`, `usage`, `effective`, then the answer itself. */
+function billingBlocks(raw: Json): Json[] {
+  return [record(raw.billing), record(raw.usage), record(raw.effective), raw].filter((block): block is Json => block !== undefined)
+}
+
+function pickFrom(blocks: readonly Json[], ...names: string[]): unknown {
+  for (const block of blocks) for (const name of names) if (block[name] !== undefined && block[name] !== null) return block[name]
+  return undefined
+}
+
+const SETTLEMENT_FIELDS = ['billing_status', 'settlement_state', 'settlement_status'] as const
+
+const tokens = (value: unknown): number | undefined => {
+  const number = typeof value === 'string' && /^\d+$/.test(value.trim()) ? Number(value) : value
+  return typeof number === 'number' && Number.isSafeInteger(number) && number >= 0 ? number : undefined
+}
+
+/**
+ * Whether a task's charge settled, for video and audio alike. An explicit
+ * pending (anywhere in the answer) wins; settled needs an explicit word. Whether
+ * any status was given at all is reported apart, so the tracker can tell an older
+ * gateway (no status: a charge then implies settled) from a word it does not know.
+ */
+function settlementOf(raw: Json, status: string): Pick<RemoteTask, 'settlement' | 'billingStatusReported' | 'settlementPendingReason' | 'billedTokens'> {
+  const blocks = billingBlocks(raw)
+  const words: string[] = []
+  let reported = status.toLowerCase() === SETTLEMENT_PENDING
+  for (const block of blocks) {
+    for (const name of SETTLEMENT_FIELDS) {
+      if (block[name] === undefined || block[name] === null) continue
+      reported = true
+      const word = text(block[name])?.toLowerCase()
+      if (word !== undefined) words.push(word)
+    }
   }
-  const originalSeconds = seconds(pick('original_seconds', 'billed_original_seconds', 'original_duration_seconds'))
-  const minutes = seconds(pick('billed_minutes', 'minutes'))
-  const stateRaw = text(pick('settlement_state', 'settlement_status'))?.toLowerCase()
-  const settlement = status.toLowerCase() === SETTLEMENT_PENDING || stateRaw === 'pending' ? 'pending'
-    : stateRaw === 'settled' || stateRaw === 'completed' ? 'settled' : undefined
+  const settlement = status.toLowerCase() === SETTLEMENT_PENDING || words.includes('pending') ? 'pending'
+    : words.includes('settled') || words.includes('completed') ? 'settled' : undefined
+  const reason = settlement === 'pending' ? text(pickFrom(blocks, 'billing_pending_reason', 'settlement_pending_reason')) : undefined
+  const billedTokens = tokens(pickFrom(blocks, 'billed_tokens'))
   return {
+    billingStatusReported: reported,
     ...settlement === undefined ? {} : { settlement },
+    ...reason === undefined ? {} : { settlementPendingReason: reason },
+    ...billedTokens === undefined ? {} : { billedTokens },
+  }
+}
+
+/** The billed lengths of an audio task: original seconds (speech) and minutes (transcription). */
+function billedLengths(raw: Json): Pick<RemoteTask, 'billedOriginalSeconds' | 'billedMinutes'> {
+  const blocks = billingBlocks(raw)
+  const originalSeconds = seconds(pickFrom(blocks, 'original_seconds', 'billed_original_seconds', 'original_duration_seconds'))
+  const minutes = seconds(pickFrom(blocks, 'billed_minutes', 'minutes'))
+  return {
     ...originalSeconds === undefined ? {} : { billedOriginalSeconds: originalSeconds },
     ...minutes === undefined ? {} : { billedMinutes: minutes },
   }
@@ -148,6 +205,7 @@ export function parseVideoTask(body: unknown): RemoteTask | undefined {
     ...progress === undefined ? {} : { progress },
     ...error === undefined ? {} : { error },
     ...receipt(raw),
+    ...settlementOf(raw, status),
     outputs: state === 'completed'
       ? [{
           index: 0,
@@ -201,7 +259,8 @@ export function parseAudioTask(body: unknown): RemoteTask | undefined {
     ...progress === undefined ? {} : { progress },
     ...error === undefined ? {} : { error },
     ...receipt(raw),
-    ...billing(raw, status),
+    ...settlementOf(raw, status),
+    ...billedLengths(raw),
     outputs: state === 'completed' ? outputs : [],
   }
 }

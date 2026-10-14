@@ -1,6 +1,6 @@
 /** The `vibedevMedia` host service, as the film workbench calls it, against a fake gateway. */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,8 +8,8 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as Media from '../src/index.js'
-import type { MediaHostService, MediaTaskView } from '../src/index.js'
-import { CATALOG, MP4, PNG } from './fixtures.js'
+import type { MediaHostService, MediaTaskView, VideoQuote, VideoQuoteRequest } from '../src/index.js'
+import { CATALOG, MP4, PNG, TOKEN_CATALOG } from './fixtures.js'
 import { json } from './helpers.js'
 
 const GATEWAY = 'https://gw.test'
@@ -105,9 +105,65 @@ describe('vibedevMedia host service', () => {
     await ctx.fiber.dispose()
   })
 
+  it('shows a pending Token settlement with its reason, then the settled charge and the billed Tokens after a refresh', async () => {
+    const effective = (extra: Record<string, unknown>) => () => json(200, { id: 'vid_1', status: 'completed', video: { url: 'https://cdn.test/vid_1.mp4' }, effective: { estimated_cny: '3.98', ...extra } })
+    routes[`GET ${GATEWAY}/v1/videos/vid_1`] = effective({ billing_status: 'pending', billing_pending_reason: 'usage_counters_inconsistent', charged_cny: '3.98' })
+    const { ctx, service } = await load()
+    const started = await service.startVideo({ prompt: 'the apple rolls' }, { cwd: workspace, folder: join(workspace, 'out'), stem: 'v' }, new AbortController().signal)
+    let task = await service.task(started.id)
+    for (let tries = 0; tries < 100 && task?.status !== 'completed'; tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      task = await service.task(started.id)
+    }
+    expect(task).toMatchObject({ status: 'completed', settlement: 'pending', settlementPendingReason: 'usage_counters_inconsistent', estimatedCny: '3.98' })
+    expect(task?.chargedCny).toBeUndefined()
+    routes[`GET ${GATEWAY}/v1/videos/vid_1`] = effective({ billing_status: 'settled', charged_cny: '3.98066354', billed_tokens: 100858 })
+    const settled = await service.refreshTask(started.id)
+    expect(settled).toMatchObject({ status: 'completed', settlement: 'settled', chargedCny: '3.98066354', estimatedCny: '3.98', billing: { tokens: 100858 } })
+    expect(settled?.settlementPendingReason).toBeUndefined()
+    expect(seen.filter(item => item.method === 'POST' && item.url === `${GATEWAY}/v1/videos`)).toHaveLength(1)
+    await ctx.fiber.dispose()
+  })
+
   it('reports an unknown task as undefined', async () => {
     const { ctx, service } = await load()
     expect(await service.task('missing')).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+})
+
+describe('vibedevMedia videoQuote', () => {
+  beforeEach(() => {
+    routes[`GET ${GATEWAY}/v1/models`] = () => json(200, { object: 'list', data: [...CATALOG.data, ...TOKEN_CATALOG.data] })
+  })
+
+  it('quotes from the catalog alone, under the canonical id of an alias: no upload, no submission, no task', async () => {
+    const { ctx, service } = await load()
+    const startVideo = vi.spyOn(service, 'startVideo')
+    const request: VideoQuoteRequest = { model: 'SD-2.5-TC', resolution: '480p', durationSeconds: 7, references: { videos: [{ durationSeconds: 5 }], images: 1, audios: 0 } }
+    const quote: VideoQuote = await service.videoQuote(request)
+    expect(quote).toMatchObject({ status: 'estimate', mode: 'video_token', model: 'video-sd-2.5(TC)', amountCny: '8.3424', label: { zh: '预计 ¥8.34 · 最终按实际视频 Token 结算' } })
+    expect(await service.videoQuote({ model: 'video-sd-2.5(TC)', resolution: '480p', durationSeconds: 5 })).toMatchObject({ model: 'video-sd-2.5(TC)', amountCny: '2.9095' })
+    expect(await service.videoQuote({ model: 'seedance-2.0', durationSeconds: 5 })).toMatchObject({ status: 'estimate', mode: 'legacy', amountCny: '4.95' })
+    expect(await service.videoQuote({ model: 'video-token-future', resolution: '480p', durationSeconds: 5 })).toMatchObject({ status: 'unavailable', reason: 'unknown-schema' })
+    // One catalog read (cached), nothing else on the network, nothing recorded.
+    expect(seen.map(item => `${item.method} ${item.url}`)).toEqual([`GET ${GATEWAY}/v1/models`])
+    expect(startVideo).not.toHaveBeenCalled()
+    expect((await readdir(state, { recursive: true })).filter(path => /tasks/.test(path))).toEqual([])
+    await ctx.fiber.dispose()
+  })
+
+  it('answers an unknown model as an invalid request rather than throwing', async () => {
+    const { ctx, service } = await load()
+    expect(await service.videoQuote({ model: 'no-such-video', durationSeconds: 5 })).toMatchObject({ status: 'unavailable', mode: 'none', model: 'no-such-video', reason: 'invalid-request' })
+    await ctx.fiber.dispose()
+  })
+
+  it('does not hide a missing sign-in as an invalid request', async () => {
+    vi.stubEnv('DSH_MEDIA_TEST_KEY', '')
+    const { ctx, service } = await load()
+    await expect(service.videoQuote({ model: 'video-sd-2.5(TC)', durationSeconds: 5 })).rejects.toMatchObject({ code: 'NOT_SIGNED_IN' })
+    expect(seen).toEqual([])
     await ctx.fiber.dispose()
   })
 })

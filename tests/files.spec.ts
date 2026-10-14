@@ -72,4 +72,28 @@ describe('gateway task answers', () => {
     expect(parseVideoTask({ id: 'v', status: 'completed', seconds: '8', url: 'https://g/u' })?.outputs).toEqual([{ index: 0, url: 'https://g/u', durationSeconds: 8 }])
     expect(parseVideoTask({ id: 'v', status: 'completed', effective: { estimated_cny: '0.60', charged_cny: '0.6000000000' } })).toMatchObject({ estimatedCny: '0.60', chargedCny: '0.6000000000' })
   })
+
+  it('reads the Token settlement of a video task: the exact charge and the billed Tokens', () => {
+    expect(parseVideoTask({ id: 'v', status: 'completed', effective: { billing_status: 'settled', charged_cny: '3.98066354', billed_tokens: 100858, estimated_cny: '3.98' } }))
+      .toMatchObject({ state: 'completed', settlement: 'settled', billingStatusReported: true, chargedCny: '3.98066354', billedTokens: 100858, estimatedCny: '3.98' })
+  })
+
+  it('lets an explicit pending win over a charge or a settled word in the same answer, and keeps its reason', () => {
+    const pending = { billing_status: 'pending', billing_pending_reason: 'usage_counters_inconsistent', charged_cny: '3.98' }
+    expect(parseVideoTask({ id: 'v', status: 'completed', effective: pending }))
+      .toMatchObject({ state: 'completed', settlement: 'pending', settlementPendingReason: 'usage_counters_inconsistent', billingStatusReported: true })
+    expect(parseVideoTask({ id: 'v', status: 'completed', settlement_state: 'settled', effective: { billing_status: 'pending' } })).toMatchObject({ settlement: 'pending' })
+    expect(parseAudioTask({ id: 'a', status: 'completed', effective: pending }))
+      .toMatchObject({ state: 'completed', settlement: 'pending', settlementPendingReason: 'usage_counters_inconsistent' })
+    expect(parseVideoTask({ id: 'v', status: 'settlement_pending' })).toMatchObject({ state: 'completed', settlement: 'pending', billingStatusReported: true })
+  })
+
+  it('tells an answer with no billing status from one with a status it does not know', () => {
+    const old = parseVideoTask({ id: 'v', status: 'completed', effective: { charged_cny: '1.00' } })
+    expect(old).toMatchObject({ billingStatusReported: false, chargedCny: '1.00' })
+    expect(old?.settlement).toBeUndefined()
+    const unknown = parseVideoTask({ id: 'v', status: 'completed', effective: { billing_status: 'reconciling', charged_cny: '1.00' } })
+    expect(unknown).toMatchObject({ billingStatusReported: true })
+    expect(unknown?.settlement).toBeUndefined()
+  })
 })

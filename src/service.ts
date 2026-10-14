@@ -19,8 +19,8 @@ import { audioFormOf, prepareAudioTask } from './audio/request.js'
 import type { AudioForm, AudioRequest } from './audio/request.js'
 import type { MediaModel } from './gateway/catalog.js'
 import { MediaError } from './gateway/errors.js'
-import { quoteAudio } from './pricing.js'
-import type { AudioQuote } from './pricing.js'
+import { quoteAudio, quoteVideo } from './pricing.js'
+import type { AudioQuote, VideoQuote, VideoQuoteRequest } from './pricing.js'
 import type { MediaCall, MediaRuntime } from './runtime.js'
 import type { TaskRecord, TaskStatus } from './tasks/store.js'
 import { generateImages } from './tools/image.js'
@@ -63,14 +63,18 @@ export interface MediaTaskView {
   readonly progress?: string
   readonly outputs?: readonly MediaOutputView[]
   readonly error?: { readonly code: string; readonly message: string }
+  /** The gateway's estimate, as given (`3.98`). */
   readonly estimatedCny?: string
+  /** Only when `settlement` is `settled`: the final charge, exactly as given (`3.98066354`). */
   readonly chargedCny?: string
   /**
    * `pending`: the result is there, the charge is still being settled (it is
-   * never generated again); `settled`: `chargedCny` is final.
+   * never generated again, and it is neither a failure nor free); `settled`: `chargedCny` is final.
    */
   readonly settlement?: 'pending' | 'settled'
-  /** How it is billed: the unit, the unit price, and the billed length once known. */
+  /** Why the settlement is pending (`billing_pending_reason`), while it is. */
+  readonly settlementPendingReason?: string
+  /** How it is billed: the unit, the unit price, and the billed length or video Tokens once known. */
   readonly billing?: TaskRecord['billing']
   readonly createdAt: number
   readonly updatedAt: number
@@ -88,8 +92,10 @@ const view = (record: TaskRecord): MediaTaskView => ({
   },
   ...record.error === undefined ? {} : { error: { ...record.error } },
   ...record.estimatedCny === undefined ? {} : { estimatedCny: record.estimatedCny },
-  ...record.chargedCny === undefined ? {} : { chargedCny: record.chargedCny },
+  // A charge is never shown as final while its settlement is pending.
+  ...record.chargedCny === undefined || record.settlement === 'pending' ? {} : { chargedCny: record.chargedCny },
   ...record.settlement === undefined ? {} : { settlement: record.settlement },
+  ...record.settlement !== 'pending' || record.settlementPendingReason === undefined ? {} : { settlementPendingReason: record.settlementPendingReason },
   ...record.billing === undefined ? {} : { billing: { ...record.billing } },
   createdAt: record.createdAt,
   updatedAt: record.updatedAt,
@@ -140,6 +146,33 @@ export class MediaHostService {
    */
   async audioPrice(model: string, signal?: AbortSignal): Promise<AudioQuote> {
     return quoteAudio(await this.runtime.findModel(model, signal))
+  }
+
+  /**
+   * What a video request is expected to cost, from the (cached) catalog alone:
+   * nothing is uploaded, submitted or recorded. Video Token pricing gives the
+   * matching rule's estimate (`预计 ¥8.34 · 最终按实际视频 Token 结算`) or says why there
+   * is none; legacy prices are quoted as before. A model the account does not
+   * have is an `invalid-request`; a catalog failure (no sign-in, no network) is thrown.
+   * @param request - the model (id or alias), resolution, duration and references.
+   * @param signal - cancels the catalog request.
+   * @returns the quote, under the model's canonical id.
+   */
+  async videoQuote(request: VideoQuoteRequest, signal?: AbortSignal): Promise<VideoQuote> {
+    const wanted = typeof request?.model === 'string' ? request.model.trim() : ''
+    let model: MediaModel
+    try {
+      if (wanted === '') throw new MediaError('A video quote needs a model.', 'MODEL_NOT_FOUND', { field: 'model' })
+      model = await this.runtime.findModel(wanted, signal)
+    } catch (error) {
+      if (!(error instanceof MediaError) || error.code !== 'MODEL_NOT_FOUND') throw error
+      return {
+        status: 'unavailable', mode: 'none', model: wanted, reason: 'invalid-request',
+        label: { en: 'estimate unavailable', zh: '无法预估' },
+        basis: { en: `There is no model "${wanted}" on this VibeDev account.`, zh: `当前 VibeDev 账号没有模型“${wanted}”。` },
+      }
+    }
+    return quoteVideo(model, request)
   }
 
   /**

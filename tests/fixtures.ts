@@ -285,6 +285,108 @@ export const AUDIO_CATALOG = {
   ],
 }
 
+/**
+ * The `video_pricing` of `video-sd-2.5(TC)` as the gateway contract publishes it
+ * (480p rules from the contract; the 720p rules are fixture values).
+ */
+export const SD25_TC_PRICING = {
+  schema_version: 1,
+  currency: 'CNY',
+  final_basis: 'provider_tokens',
+  estimate_basis: 'output_plus_reference_video_seconds',
+  estimate_only: true,
+  rules: [
+    { resolution: '480p', reference_video: false, price_per_million_tokens: 60.06, estimated_price_per_second: 0.5819 },
+    { resolution: '480p', reference_video: true, price_per_million_tokens: 36.036, estimated_price_per_second: 0.6952 },
+    { resolution: '720p', reference_video: false, reference_audio: null, price_per_million_tokens: 70, estimated_price_per_second: 1.25 },
+    { resolution: '720p', reference_video: true, reference_audio: null, price_per_million_tokens: 42, estimated_price_per_second: 1.5 },
+  ],
+}
+
+/** A v1 video block of a Token-priced lane: the capabilities come from here, never from the price rules. */
+export function tokenVideoBlock(resolutions: string[], durations: number[]) {
+  return {
+    resolutions, durations_seconds: durations, ratios: ['16:9', '9:16', '1:1'],
+    native_audio_output: true, gateway_relay_required: true,
+    modes_schema_version: 1,
+    modes: {
+      text_to_video: { inputs: {}, required_any_of: [] },
+      first_frame: { inputs: { firstFrame: { min: 1, max: 1 } }, required_any_of: [['firstFrame']] },
+      first_last_frame: {
+        inputs: { firstFrame: { min: 1, max: 1 }, lastFrame: { min: 1, max: 1 } },
+        required_any_of: [['firstFrame', 'lastFrame']],
+      },
+      omni_reference: {
+        inputs: {
+          referenceImages: { min: 0, max: 1 },
+          referenceVideos: { min: 0, max: 1, source: 'gateway_media_asset' },
+          referenceAudios: { min: 0, max: 1 },
+        },
+        required_any_of: [['referenceImages'], ['referenceVideos']],
+      },
+    },
+  }
+}
+
+/**
+ * Video models priced per video Token (`video_pricing`, schema 1), shaped like
+ * the gateway's `/v1/models` (sanitised): no unconditional `media_pricing`, and the
+ * zero text-Token fields an old client must not read as a free video.
+ */
+export const TOKEN_CATALOG = {
+  object: 'list',
+  data: [
+    {
+      id: 'video-sd-2.5(TC)', display_name: 'Seedance 2.5（TC）', media_type: 'video', protocol: 'openai', aliases: ['sd-2.5-tc'],
+      capabilities: { chat: false, output_modalities: ['video'], allowed_endpoints: ['/v1/videos'] },
+      currency: 'CNY', input_price_per_mtok: 0, output_price_per_mtok: 0,
+      video: tokenVideoBlock(['480p', '720p'], Array.from({ length: 27 }, (_, i) => i + 4)),
+      video_pricing: SD25_TC_PRICING,
+    },
+    {
+      id: 'video-sd-2.0(TC)', display_name: 'Seedance 2.0（TC）', media_type: 'video', protocol: 'openai',
+      capabilities: { chat: false, output_modalities: ['video'], allowed_endpoints: ['/v1/videos'] },
+      currency: 'CNY', input_price_per_mtok: 0, output_price_per_mtok: 0,
+      video: tokenVideoBlock(['480p'], [5, 10]),
+      video_pricing: {
+        schema_version: 1, currency: 'CNY', final_basis: 'provider_tokens', estimate_basis: 'output_plus_reference_video_seconds', estimate_only: true,
+        rules: [
+          { resolution: '480p', reference_video: false, reference_audio: null, reference_image: null, price_per_million_tokens: 40.04, estimated_price_per_second: 0.3971 },
+          { resolution: '480p', reference_video: true, price_per_million_tokens: 24.024, estimated_price_per_second: 0.4633 },
+        ],
+      },
+    },
+    {
+      // Only a Token price, no per-second estimate: the estimate is unknown, not zero.
+      id: 'video-token-no-estimate', media_type: 'video',
+      capabilities: { output_modalities: ['video'], allowed_endpoints: ['/v1/videos'] },
+      video: tokenVideoBlock(['480p'], [5]),
+      video_pricing: {
+        schema_version: 1, currency: 'CNY', final_basis: 'provider_tokens', estimate_basis: 'output_plus_reference_video_seconds', estimate_only: true,
+        rules: [{ resolution: '480p', price_per_million_tokens: 50 }],
+      },
+    },
+    {
+      // A pricing schema this plugin does not know, next to a legacy price it must not fall back to.
+      id: 'video-token-future', media_type: 'video',
+      capabilities: { output_modalities: ['video'], allowed_endpoints: ['/v1/videos'] },
+      video: tokenVideoBlock(['480p'], [5]),
+      media_pricing: { currency: 'CNY', default: { unit: 'second', amount: 0.5 } },
+      video_pricing: { schema_version: 2, currency: 'CNY', tiers: [{ resolution: '480p', price: 1 }] },
+    },
+    {
+      // One unreadable rule spoils the whole object.
+      id: 'video-token-broken', media_type: 'video',
+      capabilities: { output_modalities: ['video'], allowed_endpoints: ['/v1/videos'] },
+      video: tokenVideoBlock(['480p'], [5]),
+      video_pricing: {
+        ...SD25_TC_PRICING,
+        rules: [SD25_TC_PRICING.rules[0], { ...SD25_TC_PRICING.rules[1], reference_video: 'yes' }],
+      },
+    },
+  ],
+}
+
 /** A minimal valid PNG header (enough for sniffing). */
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d])
 export const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10])

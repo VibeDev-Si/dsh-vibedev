@@ -65,21 +65,27 @@ export interface TaskRecord {
   /** Outputs saved so far; a finished task lists every output. */
   readonly outputs?: readonly TaskOutput[]
   readonly error?: { readonly code: string; readonly message: string }
+  /** The gateway's estimate, as given (`3.98`). */
   readonly estimatedCny?: string
+  /** The final charge, exactly as given (`3.98066354`); recorded only once `settlement` is `settled`. */
   readonly chargedCny?: string
   /**
    * Whether the charge of a finished task has settled. `pending`: the result is
    * saved and is never generated again; only the charge is still to come.
    */
   readonly settlement?: 'pending' | 'settled'
+  /** Why the settlement is pending (`billing_pending_reason`), while it is. */
+  readonly settlementPendingReason?: string
   /** What an audio task makes (music, podcast or speech). */
   readonly audioKind?: string
-  /** How the task is billed, and the billed length once the gateway reports it. */
+  /** How the task is billed, and the billed quantity once the gateway reports it. */
   readonly billing?: {
     readonly unit?: string
     readonly unitPriceCny?: string
     readonly originalSeconds?: number
     readonly minutes?: number
+    /** Billable video Tokens (`billed_tokens`). */
+    readonly tokens?: number
   }
   readonly finishedAt?: number
 }

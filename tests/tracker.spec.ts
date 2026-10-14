@@ -410,6 +410,99 @@ describe('TaskTracker', () => {
     expect(await second.tracker.follow('stale')).toMatchObject({ status: 'lost', error: { code: 'SUBMISSION_UNCONFIRMED' } })
   })
 
+  describe('settlement', () => {
+    const SETTLED = { billing_status: 'settled', charged_cny: '3.98066354', billed_tokens: 100858, estimated_cny: '3.98' }
+    const PENDING = { billing_status: 'pending', billing_pending_reason: 'usage_counters_inconsistent', charged_cny: '3.98', estimated_cny: '3.98' }
+    const posts = (seen: { method: string }[]) => seen.filter(request => request.method === 'POST')
+
+    it('records a settled Token charge as the exact string given, with the billed Tokens', async () => {
+      const { fetch, seen } = fakeFetch(completed('vid_s1', { effective: SETTLED }), new Response(MP4))
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', { id: 's1', status: 'pending', gatewayId: 'vid_s1' }))
+      const final = await tracker.follow('s1')
+      expect(final).toMatchObject({ status: 'completed', settlement: 'settled', chargedCny: '3.98066354', estimatedCny: '3.98', billing: { tokens: 100858 } })
+      expect(final.settlementPendingReason).toBeUndefined()
+      expect(posts(seen)).toEqual([])
+    })
+
+    it('a pending settlement is no charge and no failure: the video is saved, the reason kept, nothing recorded as charged', async () => {
+      const { fetch, seen } = fakeFetch(completed('vid_s2', { effective: PENDING }), new Response(MP4))
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', { id: 's2', status: 'pending', gatewayId: 'vid_s2' }))
+      const final = await tracker.follow('s2')
+      expect(final).toMatchObject({ status: 'completed', settlement: 'pending', settlementPendingReason: 'usage_counters_inconsistent', estimatedCny: '3.98', outputs: [{ path: join(dir, 'out', 'cat.mp4') }] })
+      expect(final.chargedCny).toBeUndefined()
+      expect(final.error).toBeUndefined()
+      // Only the original task was read: no submission, no extra settlement look.
+      expect(seen.map(request => `${request.method} ${request.url}`)).toEqual([`GET ${ORIGIN}/v1/videos/vid_s2`, 'GET https://cdn.example.com/vid_s2.mp4'])
+    })
+
+    it('settles a pending task on a later refresh, by query only', async () => {
+      const { fetch, seen } = fakeFetch(completed('vid_s3', { effective: PENDING }), new Response(MP4), completed('vid_s3', { effective: SETTLED }))
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', { id: 's3', status: 'pending', gatewayId: 'vid_s3' }))
+      await tracker.follow('s3')
+      const settled = await tracker.refresh('s3')
+      expect(settled).toMatchObject({ status: 'completed', settlement: 'settled', chargedCny: '3.98066354', billing: { tokens: 100858 }, outputs: [{ path: join(dir, 'out', 'cat.mp4') }] })
+      expect(settled.settlementPendingReason).toBeUndefined()
+      expect(await store.get('s3')).toMatchObject({ settlement: 'settled', chargedCny: '3.98066354' })
+      expect(posts(seen)).toEqual([])
+      expect(seen.filter(request => request.url.startsWith('https://cdn.example.com/'))).toHaveLength(1)
+    })
+
+    it('an explicit pending after a settled answer is followed, and drops the charge it no longer confirms', async () => {
+      const { fetch } = fakeFetch(completed('vid_s4', { effective: PENDING }))
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', {
+        id: 's4', status: 'completed', gatewayId: 'vid_s4', settlement: 'settled', chargedCny: '3.98066354',
+        outputs: [{ index: 0, path: join(dir, 'out', 'cat.mp4') }],
+      }))
+      const refreshed = await tracker.refresh('s4')
+      expect(refreshed).toMatchObject({ settlement: 'pending', settlementPendingReason: 'usage_counters_inconsistent' })
+      expect(refreshed.chargedCny).toBeUndefined()
+    })
+
+    it('keeps a settled record when a later answer carries no billing status', async () => {
+      const { fetch } = fakeFetch(json(200, { id: 'vid_s5', status: 'completed', video: { url: 'https://cdn.example.com/vid_s5.mp4' } }))
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', {
+        id: 's5', status: 'completed', gatewayId: 'vid_s5', settlement: 'settled', chargedCny: '3.98066354', billing: { tokens: 100858 },
+        outputs: [{ index: 0, path: join(dir, 'out', 'cat.mp4') }],
+      }))
+      expect(await tracker.refresh('s5')).toMatchObject({ settlement: 'settled', chargedCny: '3.98066354', billing: { tokens: 100858 } })
+    })
+
+    it('older gateways that state no billing status: a charge means settled (the legacy fallback)', async () => {
+      const { fetch } = fakeFetch(completed('vid_s6'), new Response(MP4))
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', { id: 's6', status: 'pending', gatewayId: 'vid_s6' }))
+      expect(await tracker.follow('s6')).toMatchObject({ status: 'completed', settlement: 'settled', chargedCny: '1.00' })
+    })
+
+    it('a billing status it does not know never lets a charge count as settled', async () => {
+      const unknown = () => completed('vid_s7', { effective: { billing_status: 'reconciling', charged_cny: '3.98' } })
+      const { fetch } = fakeFetch(unknown(), new Response(MP4), unknown())
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('video', { id: 's7', status: 'pending', gatewayId: 'vid_s7' }))
+      const final = await tracker.follow('s7')
+      expect(final.status).toBe('completed')
+      expect(final.settlement).toBeUndefined()
+      expect(final.chargedCny).toBeUndefined()
+    })
+
+    it('audio tasks read billing_status the same way', async () => {
+      const { fetch } = fakeFetch(
+        json(200, { id: 'aud_s8', status: 'succeeded', effective: PENDING, outputs: [{ content_url: `${ORIGIN}/v1/media-assets/a8/content?sig=1`, content_type: 'audio/mp4' }] }),
+        new Response(M4A),
+      )
+      const { tracker, store } = setup(fetch)
+      await store.add(draft('audio', { id: 's8', status: 'pending', gatewayId: 'aud_s8' }))
+      const final = await tracker.follow('s8')
+      expect(final).toMatchObject({ status: 'completed', settlement: 'pending', settlementPendingReason: 'usage_counters_inconsistent' })
+      expect(final.chargedCny).toBeUndefined()
+    })
+  })
+
   it('does not resend while a submission is still running', async () => {
     let answer!: (response: Response) => void
     const pending = new Promise<Response>((resolve) => { answer = resolve })

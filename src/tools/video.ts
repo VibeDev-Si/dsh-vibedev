@@ -13,7 +13,8 @@ import type { MediaModel, VideoInput, VideoMode } from '../gateway/catalog.js'
 import { VIDEO_INPUTS, VIDEO_MODES } from '../gateway/catalog.js'
 import { MediaError } from '../gateway/errors.js'
 import type { UploadedAsset } from '../gateway/assets.js'
-import { estimateVideo, yuan } from '../pricing.js'
+import { quoteVideo, quotedCny, yuan } from '../pricing.js'
+import type { VideoQuote } from '../pricing.js'
 import type { MediaCall, MediaRuntime } from '../runtime.js'
 import type { TaskRecord } from '../tasks/store.js'
 import { INPUT_KIND, INPUT_PARAM, checkReferenceDurations, checkReferenceFile, planVideo, referenceByteLimit, videoRequestBody } from '../video/plan.js'
@@ -89,6 +90,8 @@ export interface PreparedVideo {
   readonly inputs: readonly VideoInput[]
   /** `5 s, 16:9, 720p`, for messages. */
   readonly shape: string
+  /** What it was confirmed at: the same quote `vibedevMedia.videoQuote` gives. */
+  readonly quote: VideoQuote
 }
 
 /**
@@ -151,12 +154,27 @@ export async function prepareVideoTask(
     ;(urls[item.input] ??= []).push(asset.referenceUrl)
   }
 
-  const referenceMs = videos.reduce((sum, clip) => sum + (clip.durationMs ?? 0), 0)
-  const estimate = estimateVideo(model, plan.duration, plan.resolution, referenceMs)
+  // Priced like any caller's quote: the presence of images (frames included), audio and video, and each
+  // reference video's measured length — a length the gateway could not measure stays unknown, never zero.
+  const quote = quoteVideo(model, {
+    model: model.id,
+    ...plan.resolution === undefined ? {} : { resolution: plan.resolution },
+    ...plan.duration === undefined ? {} : { durationSeconds: plan.duration },
+    references: {
+      videos: videos.map(clip => clip.durationMs === undefined ? {} : { durationSeconds: clip.durationMs / 1000 }),
+      images: loaded.filter(item => INPUT_KIND[item.input] === 'image').length,
+      audios: audios.length,
+    },
+  })
+  const estimatedCny = quotedCny(quote)
   const shape = [plan.duration === undefined ? undefined : `${plan.duration} s`, plan.aspectRatio, plan.resolution].filter(Boolean).join(', ')
+  // An estimate that cannot be made is said, with how the charge is reached instead.
+  const price = quote.status === 'estimate' && quote.mode === 'legacy'
+    ? { en: `, ${quote.label.en} (${quote.basis.en})`, zh: `，${quote.label.zh}` }
+    : { en: `, ${quote.label.en} (${quote.basis.en})`, zh: `，${quote.label.zh}（${quote.basis.zh}）` }
   await runtime.confirmSpending(call, 'video_generate', {
-    en: `Generate a video with ${model.id} (${plan.mode}${shape === '' ? '' : `, ${shape}`})${estimate === undefined ? '' : `, about ${yuan(estimate.amountCny)} (${estimate.basis})`}. Charged only if it succeeds.`,
-    zh: `用 ${model.id} 生成视频（${plan.mode}${shape === '' ? '' : `，${shape}`}）${estimate === undefined ? '' : `，约 ${yuan(estimate.amountCny)}`}，成功才扣费。`,
+    en: `Generate a video with ${model.id} (${plan.mode}${shape === '' ? '' : `, ${shape}`})${price.en}. Charged only if it succeeds.`,
+    zh: `用 ${model.id} 生成视频（${plan.mode}${shape === '' ? '' : `，${shape}`}）${price.zh}，成功才扣费。`,
   })
 
   const now = runtime.now()
@@ -165,9 +183,9 @@ export async function prepareVideoTask(
     ...call.agent === undefined ? {} : { owner: call.agent.id },
     outputDir: save.folder, stem: save.stem,
     endpoint: '/v1/videos', body: videoRequestBody(model.id, request.prompt, plan, urls), status: 'submitting',
-    ...estimate === undefined ? {} : { estimatedCny: estimate.amountCny.toFixed(2) },
+    ...estimatedCny === undefined ? {} : { estimatedCny },
   }
-  return { model, plan, draft, inputs: loaded.map(item => item.input), shape }
+  return { model, plan, draft, inputs: loaded.map(item => item.input), shape, quote }
 }
 
 /**
@@ -183,8 +201,8 @@ export function videoGenerateTool(runtime: MediaRuntime): ToolDefinition {
       + 'Modes: text_to_video (prompt only), first_frame (animate an image), first_last_frame (animate from one image to another), '
       + 'omni_reference (reference images, videos and audio guide characters, motion, style and sound). Each model supports different modes, '
       + 'reference counts, durations, aspect ratios and resolutions; media_models lists them, and requests a model cannot serve are refused '
-      + 'before anything is uploaded or charged. Charged per second of video (plus reference video length) only when it succeeds; '
-      + 'a running task cannot be cancelled.',
+      + 'before anything is uploaded or charged. Charged at the model\'s catalog price (per second of video plus reference video length, '
+      + 'per generation, or by actual video Tokens; media_models lists it) only when it succeeds; a running task cannot be cancelled.',
     parameters: {
       prompt: {
         type: 'string', required: true,

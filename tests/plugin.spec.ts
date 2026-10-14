@@ -11,7 +11,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import * as Media from '../src/index.js'
-import { CATALOG, MP4, PNG, WAV } from './fixtures.js'
+import { CATALOG, MP4, PNG, TOKEN_CATALOG, WAV } from './fixtures.js'
 import { json } from './helpers.js'
 
 const GATEWAY = 'https://gw.test'
@@ -80,6 +80,17 @@ describe('dsh-media plugin', () => {
     expect(textOf(result)).toContain('- seedance-2.0 — Seedance 2.0 720P; ¥0.99/s (720p)')
     expect(textOf(result)).toContain('omni_reference (reference images/videos/audios): reference_images 0-9, reference_videos 0-3, reference_audios 0-3')
     expect(seen[0]?.headers).toMatchObject({ authorization: 'Bearer dev-key', 'user-agent': `vibedev-plugin/${Media.version}` })
+    await ctx.fiber.dispose()
+  })
+
+  it('lists video Token prices as such: never "not priced", never a plain per-second price', async () => {
+    routes[`GET ${GATEWAY}/v1/models`] = () => json(200, TOKEN_CATALOG)
+    const { ctx, run } = await load()
+    const text = textOf(await run('media_models', { kind: 'video' }))
+    expect(text).toContain('- video-sd-2.5(TC) — Seedance 2.5（TC）; video Token pricing (billed by actual video Tokens): 480p without reference video ¥60.06 per million Tokens (about ¥0.5819/s)')
+    expect(text).toContain('- video-token-future — this plugin version does not support this video pricing mode: estimate unavailable; billed by actual video Token usage')
+    expect(text).not.toContain('not priced')
+    expect(text).not.toContain('¥0.50/s')
     await ctx.fiber.dispose()
   })
 

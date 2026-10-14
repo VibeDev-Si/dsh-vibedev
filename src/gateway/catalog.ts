@@ -116,6 +116,40 @@ export interface MediaPricing {
   readonly default?: { readonly unit: PriceUnit; readonly amount: number }
 }
 
+/**
+ * One video Token price rule (`video_pricing.rules[]`). A condition that is
+ * absent matches anything; `false` means the request must carry none of that
+ * reference, `true` at least one. First and last frames count as images.
+ */
+export interface VideoTokenRule {
+  /** The exact resolution tier, such as `480p`. */
+  readonly resolution: string
+  readonly referenceVideo?: boolean
+  readonly referenceAudio?: boolean
+  readonly referenceImage?: boolean
+  /** The final selling price: CNY per 1,000,000 billable video Tokens (>= 0). */
+  readonly pricePerMillionTokensCny: number
+  /** The provisional estimate per second of output plus reference video; absent is unknown, never zero. */
+  readonly estimatedPricePerSecondCny?: number
+}
+
+/**
+ * A video model's Token pricing (`video_pricing`, schema 1): the charge is the
+ * provider's billable video Tokens times the matching rule's price; the
+ * per-second figure only estimates it before the task runs.
+ */
+export interface VideoTokenPricing {
+  readonly schemaVersion: 1
+  readonly currency: 'CNY'
+  readonly finalBasis: 'provider_tokens'
+  readonly estimateBasis: 'output_plus_reference_video_seconds'
+  readonly estimateOnly: boolean
+  readonly rules: readonly VideoTokenRule[]
+}
+
+/** Why a model's `video_pricing` cannot be used: a schema this plugin does not read, or a malformed object. */
+export type VideoPricingIssue = 'unknown-schema' | 'invalid'
+
 /** What an audio model does, as the catalog declares it (`audio.generation_kind`). */
 export const AUDIO_GENERATION_KINDS = ['music', 'podcast', 'speech', 'transcription'] as const
 export type AudioGenerationKind = typeof AUDIO_GENERATION_KINDS[number]
@@ -185,6 +219,13 @@ export interface MediaModel {
   readonly endpoints: readonly string[]
   readonly inputModalities: readonly string[]
   readonly pricing?: MediaPricing
+  /** Video Token pricing (`video_pricing`); a model with it is never quoted from `pricing`. */
+  readonly videoPricing?: VideoTokenPricing
+  /**
+   * Set instead of `videoPricing` when the catalog sends `video_pricing` this plugin
+   * cannot use. Such a model has no estimate at all: it never falls back to `pricing`.
+   */
+  readonly videoPricingIssue?: VideoPricingIssue
   readonly video?: VideoCapabilities
   readonly audio?: AudioCapabilities
 }
@@ -504,6 +545,63 @@ function parsePricing(value: unknown, audioUnit?: AudioBillingUnit): MediaPricin
   }
 }
 
+const price = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+
+/** A rule condition: `null` or absent is "any", a boolean is kept as it is (false included), anything else is unreadable. */
+function condition(raw: Json, snake: string): { value?: boolean } | undefined {
+  const value = field(raw, snake)
+  if (value === undefined || value === null) return {}
+  return typeof value === 'boolean' ? { value } : undefined
+}
+
+/**
+ * Parse `video_pricing`. Every rule is checked: one unreadable rule makes the
+ * whole object unusable, since dropping it could make another rule look unique.
+ * @param value - the entry's `video_pricing`.
+ * @returns the pricing, the reason it cannot be used, or nothing when the entry has none.
+ */
+export function parseVideoPricing(value: unknown): { videoPricing?: VideoTokenPricing; videoPricingIssue?: VideoPricingIssue } {
+  if (value === undefined || value === null) return {}
+  const raw = record(value)
+  if (raw === undefined) return { videoPricingIssue: 'invalid' }
+  if (field(raw, 'schema_version') !== 1) return { videoPricingIssue: 'unknown-schema' }
+  const invalid = { videoPricingIssue: 'invalid' } as const
+  const estimateOnly = field(raw, 'estimate_only')
+  if (field(raw, 'currency') !== 'CNY' || field(raw, 'final_basis') !== 'provider_tokens'
+    || field(raw, 'estimate_basis') !== 'output_plus_reference_video_seconds' || typeof estimateOnly !== 'boolean') return invalid
+  const rulesRaw = field(raw, 'rules')
+  if (!Array.isArray(rulesRaw) || rulesRaw.length === 0) return invalid
+  const rules: VideoTokenRule[] = []
+  for (const item of rulesRaw) {
+    const entry = record(item)
+    if (entry === undefined) return invalid
+    const resolution = text(field(entry, 'resolution'))
+    const perMillion = price(field(entry, 'price_per_million_tokens'))
+    const estimateRaw = field(entry, 'estimated_price_per_second')
+    const perSecond = estimateRaw === undefined || estimateRaw === null ? undefined : price(estimateRaw)
+    const video = condition(entry, 'reference_video')
+    const audio = condition(entry, 'reference_audio')
+    const image = condition(entry, 'reference_image')
+    if (resolution === undefined || perMillion === undefined || (estimateRaw !== undefined && estimateRaw !== null && perSecond === undefined)
+      || video === undefined || audio === undefined || image === undefined) return invalid
+    rules.push({
+      resolution,
+      ...video.value === undefined ? {} : { referenceVideo: video.value },
+      ...audio.value === undefined ? {} : { referenceAudio: audio.value },
+      ...image.value === undefined ? {} : { referenceImage: image.value },
+      pricePerMillionTokensCny: perMillion,
+      ...perSecond === undefined ? {} : { estimatedPricePerSecondCny: perSecond },
+    })
+  }
+  return {
+    videoPricing: {
+      schemaVersion: 1, currency: 'CNY', finalBasis: 'provider_tokens', estimateBasis: 'output_plus_reference_video_seconds',
+      estimateOnly, rules,
+    },
+  }
+}
+
 /** Which kind of media model a catalog entry is, or undefined for a chat or internal model. */
 function kindOf(entry: Json, capabilities: Json, audio: AudioCapabilities | undefined): MediaKind | undefined {
   if (text(entry.internal_role) !== undefined) return undefined
@@ -548,6 +646,8 @@ export function parseMediaCatalog(body: unknown): MediaModel[] {
     const name = text(entry.display_name) ?? id
     const description = text(entry.description)
     const pricing = parsePricing(entry.media_pricing, audio?.billingUnit)
+    // Kept apart from `pricing`: a conditional Token price is never turned into a legacy per-second one.
+    const { videoPricing, videoPricingIssue } = parseVideoPricing(field(entry, 'video_pricing'))
     const inputModalities = strings(capabilities.input_modalities) ?? strings(entry.input_modalities) ?? []
     const endpoints = strings(capabilities.allowed_endpoints) ?? []
     const aliases = (strings(entry.aliases) ?? []).map(alias => alias.trim()).filter(alias => alias !== '' && alias !== id)
@@ -563,6 +663,8 @@ export function parseMediaCatalog(body: unknown): MediaModel[] {
       ...aliases.length === 0 ? {} : { aliases },
       ...description === undefined ? {} : { description },
       ...pricing === undefined ? {} : { pricing },
+      ...videoPricing === undefined ? {} : { videoPricing },
+      ...videoPricingIssue === undefined ? {} : { videoPricingIssue },
       ...video === undefined ? {} : { video },
       ...audio === undefined ? {} : { audio },
       ...audioKind === undefined ? {} : { audioKind },
